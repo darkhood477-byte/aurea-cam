@@ -1,0 +1,53 @@
+import re
+
+content = open("app/src/main/java/com/example/camera/CameraScreen.kt", "r").read()
+
+target = """    LaunchedEffect(tapFocusPoint, isExposureLocked) {
+        if (tapFocusPoint != null) {
+            focusPulseRadius.snapTo(80f)
+            focusPulseAlpha.snapTo(1f)
+            launch {
+                focusPulseRadius.animateTo(
+                    targetValue = 40f,
+                    animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.5f, stiffness = 400f)
+                )
+            }
+            if (!isExposureLocked) {
+                kotlinx.coroutines.delay(800)
+                focusPulseAlpha.animateTo(
+                    targetValue = 0f,
+                    animationSpec = androidx.compose.animation.core.tween(300)
+                )
+                tapFocusPoint = null
+            }
+        }
+    }"""
+
+replacement = """    LaunchedEffect(tapFocusPoint) {
+        if (tapFocusPoint != null) {
+            focusPulseRadius.snapTo(80f)
+            focusPulseAlpha.snapTo(1f)
+            focusPulseRadius.animateTo(
+                targetValue = 40f,
+                animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.5f, stiffness = 400f)
+            )
+        }
+    }
+
+    LaunchedEffect(tapFocusPoint, isExposureLocked, exposureCompensation) {
+        if (tapFocusPoint != null) {
+            focusPulseAlpha.snapTo(1f)
+            if (!isExposureLocked) {
+                kotlinx.coroutines.delay(1500)
+                focusPulseAlpha.animateTo(
+                    targetValue = 0f,
+                    animationSpec = androidx.compose.animation.core.tween(300)
+                )
+                tapFocusPoint = null
+            }
+        }
+    }"""
+
+content = content.replace(target, replacement)
+open("app/src/main/java/com/example/camera/CameraScreen.kt", "w").write(content)
+print("Updated LaunchedEffect")

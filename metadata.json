@@ -1,0 +1,6 @@
+{
+  "name": "Aurea Cam",
+  "description": "Professional camera app with composition overlays for content creators.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
