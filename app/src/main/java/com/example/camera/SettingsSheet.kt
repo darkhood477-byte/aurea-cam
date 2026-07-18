@@ -24,7 +24,11 @@ fun SettingsSheet(
     zebraStripes: Boolean,
     onZebraStripesChange: (Boolean) -> Unit,
     audioSource: String,
-    onAudioSourceChange: (String) -> Unit
+    onAudioSourceChange: (String) -> Unit,
+    burstModeEnabled: Boolean,
+    onBurstModeEnabledChange: (Boolean) -> Unit,
+    burstType: String,
+    onBurstTypeChange: (String) -> Unit
 ) {
     Box(
         modifier = Modifier
@@ -88,6 +92,40 @@ fun SettingsSheet(
                             uncheckedTrackColor = Color(0xFF2C2C2E)
                         )
                     )
+                }
+            }
+
+            SettingsGroup {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("Burst Mode", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Capture series of photos rapidly", color = Color.Gray, fontSize = 12.sp)
+                        }
+                        Switch(
+                            checked = burstModeEnabled,
+                            onCheckedChange = onBurstModeEnabledChange,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = com.example.ui.theme.Orange500,
+                                uncheckedThumbColor = Color.Gray,
+                                uncheckedTrackColor = Color(0xFF2C2C2E)
+                            )
+                        )
+                    }
+                    if (burstModeEnabled) {
+                        HorizontalDivider(color = Color(0xFF2C2C2E), thickness = 1.dp)
+                        SettingRowSegmented(
+                            title = "Burst Configuration",
+                            options = listOf("JPEG (10fps)", "RAW+JPEG (3fps)"),
+                            selectedOption = burstType,
+                            onOptionSelect = onBurstTypeChange
+                        )
+                    }
                 }
             }
             

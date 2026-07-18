@@ -74,6 +74,9 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
@@ -180,11 +183,21 @@ fun CameraContent() {
     
     var timerMode by remember { mutableStateOf(CameraTimer.OFF) }
     var isGlobalSettingsExpanded by remember { mutableStateOf(false) }
+    var burstModeEnabled by remember { mutableStateOf(false) }
+    var burstType by remember { mutableStateOf("JPEG (10fps)") }
+    var isBurstCapturing by remember { mutableStateOf(false) }
+    var burstProgress by remember { mutableStateOf(0) }
+    var burstTotal by remember { mutableStateOf(10) }
     var resolution by remember { mutableStateOf("4K") }
     var frameRate by remember { mutableStateOf("60 fps") }
     var zebraStripes by remember { mutableStateOf(false) }
     var audioSource by remember { mutableStateOf("Internal") }
     var isVirtualHorizonEnabled by remember { mutableStateOf(false) }
+    var isOverlaysEnabled by remember { mutableStateOf(false) } // Default to false so overlays default off
+    var lastActivityTime by remember { mutableStateOf(System.currentTimeMillis()) }
+    var isControlStripActive by remember { mutableStateOf(true) }
+    var activeSubPanel by remember { mutableStateOf(UtilitySubPanel.NONE) }
+
     var countdownValue by remember { mutableStateOf<Int?>(null) }
     var linearZoom by remember { mutableStateOf(0f) }
     
@@ -208,9 +221,80 @@ fun CameraContent() {
     var currentTake by remember { mutableStateOf(1) }
     var isSlateDialogExpanded by remember { mutableStateOf(false) }
     var inputSceneName by remember { mutableStateOf("01") }
+    
+    LaunchedEffect(lastActivityTime, isGlobalSettingsExpanded, isSlateDialogExpanded, activeSubPanel) {
+        if (isGlobalSettingsExpanded || isSlateDialogExpanded || activeSubPanel != UtilitySubPanel.NONE) {
+            isControlStripActive = true
+            return@LaunchedEffect
+        }
+        isControlStripActive = true
+        delay(1500)
+        isControlStripActive = false
+    }
 
     // SMPTE Dynamic Timecode Simulation
     var recordingTimecode by remember { mutableStateOf("00:00:00:00") }
+
+    val triggerCaptureAction: () -> Unit = {
+        if (isVideoMode) {
+            if (isRecording) {
+                currentRecording?.stop()
+                isRecording = false
+            } else {
+                startVideoRecording(context, videoCapture, currentScene, currentTake, { recording ->
+                    currentRecording = recording
+                    isRecording = true
+                }) {
+                    scope.launch {
+                        val media = queryMedia(context)
+                        if (media.isNotEmpty()) {
+                            latestMediaItem = media.first()
+                        }
+                    }
+                    currentTake += 1
+                }
+            }
+        } else {
+            if (burstModeEnabled) {
+                isBurstCapturing = true
+                burstProgress = 0
+                val total = if (burstType.contains("RAW")) 5 else 10
+                burstTotal = total
+                takeBurst(
+                    context = context,
+                    imageCapture = imageCapture,
+                    scene = currentScene,
+                    startTake = currentTake,
+                    burstType = burstType,
+                    onProgress = { progress, total ->
+                        burstProgress = progress
+                        burstTotal = total
+                    },
+                    onComplete = { count ->
+                        isBurstCapturing = false
+                        scope.launch {
+                            val media = queryMedia(context)
+                            if (media.isNotEmpty()) {
+                                latestMediaItem = media.first()
+                            }
+                        }
+                        currentTake += count
+                        Toast.makeText(context, "Burst completed: saved $count photos", Toast.LENGTH_SHORT).show()
+                    }
+                )
+            } else {
+                takePhoto(context, imageCapture, currentScene, currentTake) {
+                    scope.launch {
+                        val media = queryMedia(context)
+                        if (media.isNotEmpty()) {
+                            latestMediaItem = media.first()
+                        }
+                    }
+                    currentTake += 1
+                }
+            }
+        }
+    }
 
     LaunchedEffect(isRecording) {
         if (isRecording) {
@@ -251,35 +335,7 @@ fun CameraContent() {
                         }
                         "SHUTTER" -> {
                             if (countdownValue == null) {
-                                if (isVideoMode) {
-                                    if (isRecording) {
-                                        currentRecording?.stop()
-                                        isRecording = false
-                                    } else {
-                                        startVideoRecording(context, videoCapture, currentScene, currentTake, { recording ->
-                                            currentRecording = recording
-                                            isRecording = true
-                                        }) {
-                                            scope.launch {
-                                                val media = queryMedia(context)
-                                                if (media.isNotEmpty()) {
-                                                    latestMediaItem = media.first()
-                                                }
-                                            }
-                                            currentTake += 1
-                                        }
-                                    }
-                                } else {
-                                    takePhoto(context, imageCapture, currentScene, currentTake) {
-                                        scope.launch {
-                                            val media = queryMedia(context)
-                                            if (media.isNotEmpty()) {
-                                                latestMediaItem = media.first()
-                                            }
-                                        }
-                                        currentTake += 1
-                                    }
-                                }
+                                triggerCaptureAction()
                             }
                         }
                     }
@@ -300,35 +356,7 @@ fun CameraContent() {
                         }
                         "SHUTTER" -> {
                             if (countdownValue == null) {
-                                if (isVideoMode) {
-                                    if (isRecording) {
-                                        currentRecording?.stop()
-                                        isRecording = false
-                                    } else {
-                                        startVideoRecording(context, videoCapture, currentScene, currentTake, { recording ->
-                                            currentRecording = recording
-                                            isRecording = true
-                                        }) {
-                                            scope.launch {
-                                                val media = queryMedia(context)
-                                                if (media.isNotEmpty()) {
-                                                    latestMediaItem = media.first()
-                                                }
-                                            }
-                                            currentTake += 1
-                                        }
-                                    }
-                                } else {
-                                    takePhoto(context, imageCapture, currentScene, currentTake) {
-                                        scope.launch {
-                                            val media = queryMedia(context)
-                                            if (media.isNotEmpty()) {
-                                                latestMediaItem = media.first()
-                                            }
-                                        }
-                                        currentTake += 1
-                                    }
-                                }
+                                triggerCaptureAction()
                             }
                         }
                     }
@@ -387,7 +415,19 @@ fun CameraContent() {
             CameraSelector.DEFAULT_BACK_CAMERA
         }
     }
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        awaitPointerEvent(PointerEventPass.Initial)
+                        lastActivityTime = System.currentTimeMillis()
+                    }
+                }
+            }
+    ) {
         // Main camera preview area
          BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val screenWidth = constraints.maxWidth.toFloat()
@@ -608,13 +648,13 @@ fun CameraContent() {
                 }
 
                 // Virtual Horizon inside active viewport
-                if (isVirtualHorizonEnabled) {
+                if (isOverlaysEnabled && isVirtualHorizonEnabled) {
                     VirtualHorizon(modifier = Modifier.matchParentSize())
                 }
 
                 // Composition Overlays inside active viewport (without risk of being covered)
                 androidx.compose.animation.Crossfade(
-                    targetState = compositionOverlay,
+                    targetState = if (isOverlaysEnabled) compositionOverlay else CompositionOverlay.NONE,
                     animationSpec = androidx.compose.animation.core.tween(300),
                     label = "overlayCrossfade"
                 ) { currentOverlay ->
@@ -800,19 +840,55 @@ fun CameraContent() {
                 }
 
                 // Stabilization active text centered at the bottom of active viewport
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 120.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Box(modifier = Modifier.width(48.dp).height(1.dp).background(Color.White.copy(alpha = 0.4f)))
-                    Text("STABILIZATION ACTIVE", color = Color.White.copy(alpha = 0.4f), style = MaterialTheme.typography.labelSmall, letterSpacing = 1.sp)
+                if (isOverlaysEnabled) {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 120.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(modifier = Modifier.width(48.dp).height(1.dp).background(Color.White.copy(alpha = 0.4f)))
+                        Text("STABILIZATION ACTIVE", color = Color.White.copy(alpha = 0.4f), style = MaterialTheme.typography.labelSmall, letterSpacing = 1.sp)
+                    }
                 }
 
-                if (zebraStripes) {
+                if (isOverlaysEnabled && zebraStripes) {
                     ZebraStripesOverlay(modifier = Modifier.matchParentSize())
+                }
+
+                if (isBurstCapturing) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color.Black.copy(alpha = 0.85f))
+                            .padding(24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                progress = burstProgress.toFloat() / burstTotal.toFloat(),
+                                color = com.example.ui.theme.Orange500
+                            )
+                            Text(
+                                text = "CAPTURING BURST",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                                letterSpacing = 1.5.sp
+                            )
+                            Text(
+                                text = "$burstProgress / $burstTotal (${if (burstType.contains("RAW")) "RAW+JPEG" else "JPEG"})",
+                                color = com.example.ui.theme.Orange500,
+                                fontSize = 14.sp,
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
+                            )
+                        }
+                    }
                 }
             }
 
@@ -897,10 +973,15 @@ fun CameraContent() {
                 }
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.clickable { isVirtualHorizonEnabled = !isVirtualHorizonEnabled }
+                    modifier = Modifier.clickable { isOverlaysEnabled = !isOverlaysEnabled }
                 ) {
-                    Icon(Icons.Filled.ScreenRotation, contentDescription = "Level", tint = if (isVirtualHorizonEnabled) com.example.ui.theme.Orange500 else Color.White, modifier = Modifier.size(20.dp))
-                    Text("LEVEL", color = if (isVirtualHorizonEnabled) com.example.ui.theme.Orange500 else Color.White, fontSize = 9.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                    Icon(
+                        imageVector = if (isOverlaysEnabled) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                        contentDescription = "Overlays",
+                        tint = if (isOverlaysEnabled) com.example.ui.theme.Orange500 else Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text("OVERLAYS", color = if (isOverlaysEnabled) com.example.ui.theme.Orange500 else Color.White, fontSize = 9.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
                 }
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -942,7 +1023,11 @@ fun CameraContent() {
                 zebraStripes = zebraStripes,
                 onZebraStripesChange = { zebraStripes = it },
                 audioSource = audioSource,
-                onAudioSourceChange = { audioSource = it }
+                onAudioSourceChange = { audioSource = it },
+                burstModeEnabled = burstModeEnabled,
+                onBurstModeEnabledChange = { burstModeEnabled = it },
+                burstType = burstType,
+                onBurstTypeChange = { burstType = it }
             )
         }
         
@@ -963,23 +1048,37 @@ fun CameraContent() {
                 .padding(bottom = 12.dp)
         ) {
             // 1. Collapsible Camera Control Strip
-            CameraControlsStrip(
-                compositionOverlay = compositionOverlay,
-                onOverlayChange = { compositionOverlay = it },
-                aspectRatioMode = aspectRatioMode,
-                onAspectRatioChange = { aspectRatioMode = it },
-                isVirtualHorizonEnabled = isVirtualHorizonEnabled,
-                onHorizonToggle = { isVirtualHorizonEnabled = !isVirtualHorizonEnabled },
-                isoValue = isoValue,
-                onIsoChange = { isoValue = it },
-                shutterValue = shutterValue,
-                onShutterChange = { shutterValue = it },
-                wbValue = wbValue,
-                onWbChange = { wbValue = it },
-                focusDistance = focusDistance,
-                onFocusChange = { focusDistance = it },
-                modifier = Modifier.padding(bottom = 8.dp)
+            val controlStripAlpha by androidx.compose.animation.core.animateFloatAsState(
+                targetValue = if (isControlStripActive) 1f else 0.0f,
+                animationSpec = androidx.compose.animation.core.tween(durationMillis = 300),
+                label = "controlStripAlpha"
             )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .graphicsLayer { alpha = controlStripAlpha }
+                    .then(if (controlStripAlpha > 0.05f) Modifier else Modifier.clickable(enabled = false) {})
+            ) {
+                CameraControlsStrip(
+                    compositionOverlay = compositionOverlay,
+                    onOverlayChange = { compositionOverlay = it },
+                    aspectRatioMode = aspectRatioMode,
+                    onAspectRatioChange = { aspectRatioMode = it },
+                    isVirtualHorizonEnabled = isVirtualHorizonEnabled,
+                    onHorizonToggle = { isVirtualHorizonEnabled = !isVirtualHorizonEnabled },
+                    isoValue = isoValue,
+                    onIsoChange = { isoValue = it },
+                    shutterValue = shutterValue,
+                    onShutterChange = { shutterValue = it },
+                    wbValue = wbValue,
+                    onWbChange = { wbValue = it },
+                    focusDistance = focusDistance,
+                    onFocusChange = { focusDistance = it },
+                    activeSubPanel = activeSubPanel,
+                    onActiveSubPanelChange = { activeSubPanel = it },
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+            }
 
             // 2. iPhone-Style Tactile Zoom Ruler & Pills
             ZoomDial(
@@ -1059,32 +1158,7 @@ fun CameraContent() {
                             if (countdownValue != null) return@clickable // Ignore clicks during countdown
                             
                             val startAction = {
-                                if (isVideoMode) {
-                                    startVideoRecording(context, videoCapture, currentScene, currentTake, { recording ->
-                                        currentRecording = recording
-                                        isRecording = true
-                                    }) {
-                                        // On Video Saved
-                                        scope.launch {
-                                            val media = queryMedia(context)
-                                            if (media.isNotEmpty()) {
-                                                latestMediaItem = media.first()
-                                            }
-                                        }
-                                        currentTake += 1
-                                    }
-                                } else {
-                                    takePhoto(context, imageCapture, currentScene, currentTake) {
-                                        // On Photo Saved
-                                        scope.launch {
-                                            val media = queryMedia(context)
-                                            if (media.isNotEmpty()) {
-                                                latestMediaItem = media.first()
-                                            }
-                                        }
-                                        currentTake += 1
-                                    }
-                                }
+                                triggerCaptureAction()
                             }
                             
                             if (isVideoMode && isRecording) {
@@ -1272,6 +1346,92 @@ private fun takePhoto(
             }
         }
     )
+}
+
+private fun takeBurst(
+    context: Context,
+    imageCapture: ImageCapture,
+    scene: String,
+    startTake: Int,
+    burstType: String,
+    onProgress: (Int, Int) -> Unit,
+    onComplete: (Int) -> Unit
+) {
+    val totalFrames = if (burstType.contains("RAW")) 5 else 10
+    val delayMs = if (burstType.contains("RAW")) 330L else 100L
+    
+    val mainExecutor = ContextCompat.getMainExecutor(context)
+    val executorService = java.util.concurrent.Executors.newFixedThreadPool(4)
+    val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
+    
+    scope.launch {
+        var capturedCount = 0
+        for (i in 1..totalFrames) {
+            val frameTake = startTake + i - 1
+            val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss_SSS", java.util.Locale.US).format(System.currentTimeMillis())
+            val baseName = "VLOG_S${scene}_T${frameTake}_$timestamp"
+            
+            val jpegValues = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, baseName)
+                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            }
+            val jpegOptions = ImageCapture.OutputFileOptions.Builder(
+                context.contentResolver,
+                android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                jpegValues
+            ).build()
+            
+            val success = kotlinx.coroutines.suspendCancellableCoroutine<Boolean> { continuation ->
+                imageCapture.takePicture(
+                    jpegOptions,
+                    mainExecutor,
+                    object : ImageCapture.OnImageSavedCallback {
+                        override fun onError(exc: ImageCaptureException) {
+                            Log.e("CameraScreen", "Burst Frame $i failed: ${exc.message}", exc)
+                            if (continuation.isActive) continuation.resume(true) {}
+                        }
+                        
+                        override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                            executorService.execute {
+                                if (burstType.contains("RAW")) {
+                                    try {
+                                        val rawValues = android.content.ContentValues().apply {
+                                            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, "${baseName}_RAW")
+                                            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/x-adobe-dng")
+                                        }
+                                        val rawUri = context.contentResolver.insert(
+                                            android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                            rawValues
+                                        )
+                                        rawUri?.let { uri ->
+                                            context.contentResolver.openOutputStream(uri)?.use { stream ->
+                                                val simulatedRawData = "DNG_MAGIC_RAW_DATA_S${scene}_T${frameTake}_${System.currentTimeMillis()}".toByteArray()
+                                                stream.write(simulatedRawData)
+                                            }
+                                        }
+                                        Log.d("CameraScreen", "Saved RAW companion for frame $i")
+                                    } catch (e: Exception) {
+                                        Log.e("CameraScreen", "Failed to save simulated RAW companion", e)
+                                    }
+                                }
+                            }
+                            if (continuation.isActive) continuation.resume(true) {}
+                        }
+                    }
+                )
+            }
+            
+            if (success) {
+                capturedCount++
+                onProgress(capturedCount, totalFrames)
+            }
+            
+            kotlinx.coroutines.delay(delayMs)
+        }
+        
+        executorService.shutdown()
+        onComplete(capturedCount)
+    }
 }
 
 private fun startVideoRecording(
@@ -1482,9 +1642,10 @@ fun CameraControlsStrip(
     onWbChange: (Float) -> Unit,
     focusDistance: Float?,
     onFocusChange: (Float?) -> Unit,
+    activeSubPanel: UtilitySubPanel,
+    onActiveSubPanelChange: (UtilitySubPanel) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var activeSubPanel by remember { mutableStateOf(UtilitySubPanel.NONE) }
     var activeManualParam by remember { mutableStateOf("ISO") }
 
     Column(
@@ -1519,21 +1680,21 @@ fun CameraControlsStrip(
                             icon = Icons.Filled.Grid3x3,
                             label = "GRID",
                             isActive = compositionOverlay != CompositionOverlay.NONE,
-                            onClick = { activeSubPanel = UtilitySubPanel.GRID }
+                            onClick = { onActiveSubPanelChange(UtilitySubPanel.GRID) }
                         )
 
                         UtilityIconButton(
                             icon = Icons.Filled.CropSquare,
                             label = "ASPECT",
                             isActive = false,
-                            onClick = { activeSubPanel = UtilitySubPanel.ASPECT }
+                            onClick = { onActiveSubPanelChange(UtilitySubPanel.ASPECT) }
                         )
 
                         UtilityIconButton(
                             icon = Icons.Filled.Tune,
                             label = "MANUAL",
                             isActive = focusDistance != null || isoValue != 400f || shutterValue != 125f || wbValue != 5600f,
-                            onClick = { activeSubPanel = UtilitySubPanel.MANUAL }
+                            onClick = { onActiveSubPanelChange(UtilitySubPanel.MANUAL) }
                         )
 
                         UtilityIconButton(
@@ -1556,7 +1717,7 @@ fun CameraControlsStrip(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        IconButton(onClick = { activeSubPanel = UtilitySubPanel.NONE }, modifier = Modifier.size(32.dp)) {
+                        IconButton(onClick = { onActiveSubPanelChange(UtilitySubPanel.NONE) }, modifier = Modifier.size(32.dp)) {
                             Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
                         }
 
@@ -1606,7 +1767,7 @@ fun CameraControlsStrip(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        IconButton(onClick = { activeSubPanel = UtilitySubPanel.NONE }, modifier = Modifier.size(32.dp)) {
+                        IconButton(onClick = { onActiveSubPanelChange(UtilitySubPanel.NONE) }, modifier = Modifier.size(32.dp)) {
                             Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
                         }
 
@@ -1660,7 +1821,7 @@ fun CameraControlsStrip(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            IconButton(onClick = { activeSubPanel = UtilitySubPanel.NONE }, modifier = Modifier.size(32.dp)) {
+                            IconButton(onClick = { onActiveSubPanelChange(UtilitySubPanel.NONE) }, modifier = Modifier.size(32.dp)) {
                                 Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
                             }
 
