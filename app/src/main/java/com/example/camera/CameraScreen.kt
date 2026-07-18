@@ -18,6 +18,7 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
@@ -178,7 +179,16 @@ fun CameraContent() {
             CameraSelector.DEFAULT_BACK_CAMERA
         }
     }
-    val imageCapture = remember { ImageCapture.Builder().build() }
+    val imageCapture = remember(aspectRatioMode) {
+        val cxRatio = when (aspectRatioMode) {
+            AspectRatioMode.RATIO_16_9, AspectRatioMode.RATIO_9_16 -> androidx.camera.core.AspectRatio.RATIO_16_9
+            AspectRatioMode.RATIO_4_3 -> androidx.camera.core.AspectRatio.RATIO_4_3
+            else -> androidx.camera.core.AspectRatio.RATIO_16_9
+        }
+        ImageCapture.Builder()
+            .setTargetAspectRatio(cxRatio)
+            .build()
+    }
     
     val recorder = remember {
         Recorder.Builder()
@@ -189,155 +199,177 @@ fun CameraContent() {
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         // Main camera preview area
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val screenWidth = constraints.maxWidth.toFloat()
             val screenHeight = constraints.maxHeight.toFloat()
             val screenRatio = if (screenHeight > 0) screenWidth / screenHeight else 1f
-            val targetRatio = aspectRatioMode.ratio ?: screenRatio
-            val animatedRatio by androidx.compose.animation.core.animateFloatAsState(
-                targetValue = targetRatio,
-                animationSpec = androidx.compose.animation.core.tween(durationMillis = 300),
-                label = "aspectRatioAnimation"
-            )
-
-            CameraPreviewWithUseCases(
-                cameraSelector = cameraSelector,
-                imageCapture = imageCapture,
-                videoCapture = videoCapture,
-                isVideoMode = isVideoMode,
-                focusDistance = focusDistance,
-                isExposureLocked = isExposureLocked,
-                exposureCompensation = exposureCompensation,
-                onTapToFocus = { x, y ->
-                    isExposureLocked = false
-                    exposureCompensation = 0f
-                    tapFocusPoint = androidx.compose.ui.geometry.Offset(x, y)
-                },
-                onLongPressToLock = { x, y ->
-                    isExposureLocked = true
-                    tapFocusPoint = androidx.compose.ui.geometry.Offset(x, y)
-                },
-                onExposureChange = { dy ->
-                    // dy is positive when swiping up, negative when swiping down (or vice versa)
-                    // Let's say drag up increases exposure. In Android, dy < 0 means finger moved up.
-                    // So we subtract dy.
-                    exposureCompensation = (exposureCompensation - dy * 0.05f).coerceIn(-12f, 12f)
-                }
-            )
-
-            // Virtual Horizon
-            if (isVirtualHorizonEnabled) {
-                VirtualHorizon(modifier = Modifier.matchParentSize())
+            val isPortraitScreen = screenRatio < 1f
+            val targetRatio = when (aspectRatioMode) {
+                AspectRatioMode.RATIO_9_16 -> if (isPortraitScreen) 9f / 16f else 16f / 9f
+                AspectRatioMode.RATIO_16_9 -> if (isPortraitScreen) 9f / 16f else 16f / 9f
+                AspectRatioMode.RATIO_4_3 -> if (isPortraitScreen) 3f / 4f else 4f / 3f
+                AspectRatioMode.RATIO_1_1 -> 1f
+                AspectRatioMode.FULL -> screenRatio
             }
 
-            // Overlays
-            androidx.compose.animation.Crossfade(
-                targetState = compositionOverlay,
-                animationSpec = androidx.compose.animation.core.tween(300),
-                label = "overlayCrossfade"
-            ) { currentOverlay ->
-                CompositionOverlayCanvas(overlay = currentOverlay, aspectRatio = animatedRatio)
+            // Calculate target container size to fit perfectly inside the BoxWithConstraints bounding box
+            val maxContainerWidth = this.maxWidth
+            val maxContainerHeight = this.maxHeight
+            val containerRatio = if (maxContainerHeight.value > 0) maxContainerWidth.value / maxContainerHeight.value else 1f
+            
+            val (targetWidth, targetHeight) = if (containerRatio < targetRatio) {
+                val w = maxContainerWidth
+                val h = maxContainerWidth / targetRatio
+                Pair(w, h)
+            } else {
+                val h = maxContainerHeight
+                val w = maxContainerHeight * targetRatio
+                Pair(w, h)
             }
 
-            // Aspect Ratio Crop Guides
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                if (kotlin.math.abs(screenRatio - animatedRatio) > 0.001f) {
-                    if (screenRatio < animatedRatio) {
-                        val cropHeight = size.width / animatedRatio
-                        val margin = (size.height - cropHeight) / 2
-                        drawRect(color = Color.Black, topLeft = androidx.compose.ui.geometry.Offset(0f, 0f), size = androidx.compose.ui.geometry.Size(size.width, margin))
-                        drawRect(color = Color.Black, topLeft = androidx.compose.ui.geometry.Offset(0f, size.height - margin), size = androidx.compose.ui.geometry.Size(size.width, margin))
-                    } else {
-                        val cropWidth = size.height * animatedRatio
-                        val margin = (size.width - cropWidth) / 2
-                        drawRect(color = Color.Black, topLeft = androidx.compose.ui.geometry.Offset(0f, 0f), size = androidx.compose.ui.geometry.Size(margin, size.height))
-                        drawRect(color = Color.Black, topLeft = androidx.compose.ui.geometry.Offset(size.width - margin, 0f), size = androidx.compose.ui.geometry.Size(margin, size.height))
+            // Smoothly animate both width and height (equivalent to smooth CSS transitions)
+            val animatedWidth by androidx.compose.animation.core.animateDpAsState(
+                targetValue = targetWidth,
+                animationSpec = androidx.compose.animation.core.tween(
+                    durationMillis = 350,
+                    easing = androidx.compose.animation.core.FastOutSlowInEasing
+                ),
+                label = "previewWidthAnimation"
+            )
+            val animatedHeight by androidx.compose.animation.core.animateDpAsState(
+                targetValue = targetHeight,
+                animationSpec = androidx.compose.animation.core.tween(
+                    durationMillis = 350,
+                    easing = androidx.compose.animation.core.FastOutSlowInEasing
+                ),
+                label = "previewHeightAnimation"
+            )
+
+            // Centers and smoothly resizes the active camera preview and its overlays (equivalent to smooth CSS transitions)
+            Box(
+                modifier = Modifier
+                    .size(animatedWidth, animatedHeight)
+                    .align(Alignment.Center)
+                    .background(Color.Black)
+            ) {
+                CameraPreviewWithUseCases(
+                    modifier = Modifier.fillMaxSize(),
+                    cameraSelector = cameraSelector,
+                    imageCapture = imageCapture,
+                    videoCapture = videoCapture,
+                    isVideoMode = isVideoMode,
+                    aspectRatioMode = aspectRatioMode,
+                    focusDistance = focusDistance,
+                    isExposureLocked = isExposureLocked,
+                    exposureCompensation = exposureCompensation,
+                    onTapToFocus = { x, y ->
+                        isExposureLocked = false
+                        exposureCompensation = 0f
+                        tapFocusPoint = androidx.compose.ui.geometry.Offset(x, y)
+                    },
+                    onLongPressToLock = { x, y ->
+                        isExposureLocked = true
+                        tapFocusPoint = androidx.compose.ui.geometry.Offset(x, y)
+                    },
+                    onExposureChange = { dy ->
+                        exposureCompensation = (exposureCompensation - dy * 0.05f).coerceIn(-12f, 12f)
                     }
-                }
-            }
+                )
 
-            // Central crosshair like in the HTML design
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                drawLine(color = Color.White.copy(alpha = 0.1f), start = androidx.compose.ui.geometry.Offset(size.width / 2, 0f), end = androidx.compose.ui.geometry.Offset(size.width / 2, size.height), strokeWidth = 1f)
-                drawLine(color = Color.White.copy(alpha = 0.1f), start = androidx.compose.ui.geometry.Offset(0f, size.height / 2), end = androidx.compose.ui.geometry.Offset(size.width, size.height / 2), strokeWidth = 1f)
-                
-                tapFocusPoint?.let { point ->
-                    val color = com.example.ui.theme.Orange500.copy(alpha = focusPulseAlpha.value)
-                    val size = focusPulseRadius.value * 2
-                    drawRect(
-                        color = color,
-                        topLeft = androidx.compose.ui.geometry.Offset(point.x - size / 2, point.y - size / 2),
-                        size = androidx.compose.ui.geometry.Size(size, size),
-                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f)
-                    )
-                    // Draw a sun icon next to it
-                    val sunX = point.x + size / 2 + 32f
-                    // exposureCompensation goes from -12 to 12. 
-                    // Negative is darker (sun moves down), Positive is brighter (sun moves up).
-                    // So -exposureCompensation maps to vertical offset.
-                    val sliderOffset = -(exposureCompensation / 12f) * 60f
-                    val sunY = point.y + sliderOffset
+                // Virtual Horizon inside active viewport
+                if (isVirtualHorizonEnabled) {
+                    VirtualHorizon(modifier = Modifier.matchParentSize())
+                }
+
+                // Composition Overlays inside active viewport (without risk of being covered)
+                androidx.compose.animation.Crossfade(
+                    targetState = compositionOverlay,
+                    animationSpec = androidx.compose.animation.core.tween(300),
+                    label = "overlayCrossfade"
+                ) { currentOverlay ->
+                    CompositionOverlayCanvas(overlay = currentOverlay, aspectRatio = null)
+                }
+
+                // Central crosshair centered in active viewport
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    drawLine(color = Color.White.copy(alpha = 0.1f), start = androidx.compose.ui.geometry.Offset(size.width / 2, 0f), end = androidx.compose.ui.geometry.Offset(size.width / 2, size.height), strokeWidth = 1f)
+                    drawLine(color = Color.White.copy(alpha = 0.1f), start = androidx.compose.ui.geometry.Offset(0f, size.height / 2), end = androidx.compose.ui.geometry.Offset(size.width, size.height / 2), strokeWidth = 1f)
                     
-                    // Draw a thin line for the slider track
-                    drawLine(
-                        color = color.copy(alpha = 0.5f),
-                        start = androidx.compose.ui.geometry.Offset(sunX, point.y - 60f),
-                        end = androidx.compose.ui.geometry.Offset(sunX, point.y + 60f),
-                        strokeWidth = 2f
-                    )
-                    
-                    drawCircle(
-                        color = color,
-                        radius = 10f,
-                        center = androidx.compose.ui.geometry.Offset(sunX, sunY),
-                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f)
-                    )
-                    // draw lines for the sun
-                    for (i in 0 until 8) {
-                        val angle = (i * 45) * Math.PI / 180
-                        val startX = sunX + kotlin.math.cos(angle).toFloat() * 14f
-                        val startY = sunY + kotlin.math.sin(angle).toFloat() * 14f
-                        val endX = sunX + kotlin.math.cos(angle).toFloat() * 18f
-                        val endY = sunY + kotlin.math.sin(angle).toFloat() * 18f
-                        drawLine(
+                    tapFocusPoint?.let { point ->
+                        val color = com.example.ui.theme.Orange500.copy(alpha = focusPulseAlpha.value)
+                        val size = focusPulseRadius.value * 2
+                        drawRect(
                             color = color,
-                            start = androidx.compose.ui.geometry.Offset(startX, startY),
-                            end = androidx.compose.ui.geometry.Offset(endX, endY),
+                            topLeft = androidx.compose.ui.geometry.Offset(point.x - size / 2, point.y - size / 2),
+                            size = androidx.compose.ui.geometry.Size(size, size),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f)
+                        )
+                        // Draw a sun icon next to it
+                        val sunX = point.x + size / 2 + 32f
+                        val sliderOffset = -(exposureCompensation / 12f) * 60f
+                        val sunY = point.y + sliderOffset
+                        
+                        // Draw a thin line for the slider track
+                        drawLine(
+                            color = color.copy(alpha = 0.5f),
+                            start = androidx.compose.ui.geometry.Offset(sunX, point.y - 60f),
+                            end = androidx.compose.ui.geometry.Offset(sunX, point.y + 60f),
                             strokeWidth = 2f
                         )
+                        
+                        drawCircle(
+                            color = color,
+                            radius = 10f,
+                            center = androidx.compose.ui.geometry.Offset(sunX, sunY),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f)
+                        )
+                        // draw lines for the sun
+                        for (i in 0 until 8) {
+                            val angle = (i * 45) * Math.PI / 180
+                            val startX = sunX + kotlin.math.cos(angle).toFloat() * 14f
+                            val startY = sunY + kotlin.math.sin(angle).toFloat() * 14f
+                            val endX = sunX + kotlin.math.cos(angle).toFloat() * 18f
+                            val endY = sunY + kotlin.math.sin(angle).toFloat() * 18f
+                            drawLine(
+                                color = color,
+                                start = androidx.compose.ui.geometry.Offset(startX, startY),
+                                end = androidx.compose.ui.geometry.Offset(endX, endY),
+                                strokeWidth = 2f
+                            )
+                        }
                     }
                 }
-            }
-            
-            // AE/AF LOCK Badge
-            if (isExposureLocked) {
-                Box(
+                
+                // AE/AF LOCK Badge inside active viewport
+                if (isExposureLocked) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 90.dp)
+                            .clip(MaterialTheme.shapes.small)
+                            .background(com.example.ui.theme.Orange500)
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("AE/AF LOCK", color = Color.Black, fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                    }
+                }
+
+                // Stabilization active text centered at the bottom of active viewport
+                Column(
                     modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 90.dp)
-                        .clip(MaterialTheme.shapes.small)
-                        .background(com.example.ui.theme.Orange500)
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 120.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("AE/AF LOCK", color = Color.Black, fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                    Box(modifier = Modifier.width(48.dp).height(1.dp).background(Color.White.copy(alpha = 0.4f)))
+                    Text("STABILIZATION ACTIVE", color = Color.White.copy(alpha = 0.4f), style = MaterialTheme.typography.labelSmall, letterSpacing = 1.sp)
+                }
+
+                if (zebraStripes) {
+                    ZebraStripesOverlay(modifier = Modifier.matchParentSize())
                 }
             }
-
-            // Stabilization active text
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 120.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box(modifier = Modifier.width(48.dp).height(1.dp).background(Color.White.copy(alpha = 0.4f)))
-                Text("STABILIZATION ACTIVE", color = Color.White.copy(alpha = 0.4f), style = MaterialTheme.typography.labelSmall, letterSpacing = 1.sp)
-            }
-
-            if (zebraStripes) {
-            ZebraStripesOverlay(modifier = Modifier.matchParentSize())
-        }
 
         // Left side settings panel
             Row(
@@ -596,33 +628,50 @@ fun CameraContent() {
                         Text(label, color = if (isActive) com.example.ui.theme.Orange500 else Color.White.copy(alpha = 0.4f), fontSize = 9.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
                     }
                 }
-                
-                // Crop Button
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
+            }
+
+            // Dedicated Aspect Ratio Segmented Picker Control
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
                     modifier = Modifier
-                        .clickable {
-                            aspectRatioMode = when (aspectRatioMode) {
-                                AspectRatioMode.FULL -> AspectRatioMode.RATIO_16_9
-                                AspectRatioMode.RATIO_16_9 -> AspectRatioMode.RATIO_4_3
-                                AspectRatioMode.RATIO_4_3 -> AspectRatioMode.RATIO_1_1
-                                AspectRatioMode.RATIO_1_1 -> AspectRatioMode.RATIO_9_16
-                                AspectRatioMode.RATIO_9_16 -> AspectRatioMode.FULL
-                            }
-                        }
-                        .padding(8.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.4f))
+                        .border(1.dp, Color.White.copy(alpha = 0.15f), CircleShape)
+                        .padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    val icon = when (aspectRatioMode) {
-                        AspectRatioMode.RATIO_16_9 -> Icons.Filled.Crop169
-                        AspectRatioMode.RATIO_4_3 -> Icons.Filled.Crop75 // Approximate
-                        AspectRatioMode.RATIO_1_1 -> Icons.Filled.CropSquare
-                        AspectRatioMode.RATIO_9_16 -> Icons.Filled.CropPortrait
-                        AspectRatioMode.FULL -> Icons.Filled.CropFree
+                    val ratios = listOf(
+                        AspectRatioMode.RATIO_9_16 to "9:16",
+                        AspectRatioMode.RATIO_1_1 to "1:1",
+                        AspectRatioMode.RATIO_16_9 to "16:9",
+                        AspectRatioMode.RATIO_4_3 to "4:3",
+                        AspectRatioMode.FULL to "FULL"
+                    )
+                    ratios.forEach { (mode, label) ->
+                        val isSelected = aspectRatioMode == mode
+                        Box(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (isSelected) com.example.ui.theme.Orange500 else Color.Transparent)
+                                .clickable { aspectRatioMode = mode }
+                                .padding(horizontal = 14.dp, vertical = 6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = label,
+                                color = if (isSelected) Color.Black else Color.White.copy(alpha = 0.7f),
+                                fontSize = 10.sp,
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                            )
+                        }
                     }
-                    val isActive = aspectRatioMode != AspectRatioMode.FULL
-                    Icon(icon, contentDescription = "Aspect Ratio", tint = if (isActive) com.example.ui.theme.Orange500 else Color.White.copy(alpha = 0.4f), modifier = Modifier.size(24.dp))
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(aspectRatioMode.label, color = if (isActive) com.example.ui.theme.Orange500 else Color.White.copy(alpha = 0.4f), fontSize = 9.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
                 }
             }
 

@@ -30,6 +30,7 @@ import android.hardware.camera2.CaptureRequest
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.CaptureRequestOptions
 
+@androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
 @Composable
 fun CameraPreviewWithUseCases(
     modifier: Modifier = Modifier,
@@ -37,6 +38,7 @@ fun CameraPreviewWithUseCases(
     imageCapture: ImageCapture,
     videoCapture: VideoCapture<Recorder>,
     isVideoMode: Boolean = false,
+    aspectRatioMode: AspectRatioMode = AspectRatioMode.RATIO_9_16,
     focusDistance: Float? = null,
     isExposureLocked: Boolean = false,
     exposureCompensation: Float = 0f,
@@ -81,7 +83,7 @@ fun CameraPreviewWithUseCases(
         }
     }
 
-    LaunchedEffect(cameraSelector) {
+    LaunchedEffect(cameraSelector, isVideoMode, imageCapture, videoCapture, aspectRatioMode) {
         val provider = kotlinx.coroutines.suspendCancellableCoroutine<ProcessCameraProvider> { continuation ->
             val future = ProcessCameraProvider.getInstance(context)
             future.addListener({
@@ -89,9 +91,19 @@ fun CameraPreviewWithUseCases(
             }, ContextCompat.getMainExecutor(context))
         }
         cameraProvider = provider
-        val preview = Preview.Builder().build().also {
-            it.surfaceProvider = previewView.surfaceProvider
+
+        val cxRatio = when (aspectRatioMode) {
+            AspectRatioMode.RATIO_16_9, AspectRatioMode.RATIO_9_16 -> androidx.camera.core.AspectRatio.RATIO_16_9
+            AspectRatioMode.RATIO_4_3 -> androidx.camera.core.AspectRatio.RATIO_4_3
+            else -> androidx.camera.core.AspectRatio.RATIO_16_9
         }
+
+        val preview = Preview.Builder()
+            .setTargetAspectRatio(cxRatio)
+            .build()
+            .also {
+                it.surfaceProvider = previewView.surfaceProvider
+            }
         try {
             provider.unbindAll()
             
@@ -107,12 +119,45 @@ fun CameraPreviewWithUseCases(
                 }
             }
 
+            val dm = context.resources.displayMetrics
+            val isPortraitScreen = dm.heightPixels > dm.widthPixels
+
+            val rational = when (aspectRatioMode) {
+                AspectRatioMode.RATIO_16_9 -> if (isPortraitScreen) android.util.Rational(9, 16) else android.util.Rational(16, 9)
+                AspectRatioMode.RATIO_9_16 -> if (isPortraitScreen) android.util.Rational(9, 16) else android.util.Rational(16, 9)
+                AspectRatioMode.RATIO_4_3 -> if (isPortraitScreen) android.util.Rational(3, 4) else android.util.Rational(4, 3)
+                AspectRatioMode.RATIO_1_1 -> android.util.Rational(1, 1)
+                AspectRatioMode.FULL -> {
+                    android.util.Rational(dm.widthPixels, dm.heightPixels)
+                }
+            }
+
+            val displayRotation = try {
+                previewView.display?.rotation ?: android.view.Surface.ROTATION_0
+            } catch (e: Exception) {
+                android.view.Surface.ROTATION_0
+            }
+
+            val viewPort = androidx.camera.core.ViewPort.Builder(rational, displayRotation)
+                .setScaleType(androidx.camera.core.ViewPort.FILL_CENTER)
+                .build()
+
+            val useCaseGroup = androidx.camera.core.UseCaseGroup.Builder()
+                .addUseCase(preview)
+                .setViewPort(viewPort)
+                .apply {
+                    if (isVideoMode) {
+                        addUseCase(videoCapture)
+                    } else {
+                        addUseCase(imageCapture)
+                    }
+                }
+                .build()
+
             currentCamera = provider.bindToLifecycle(
                 lifecycleOwner,
                 resolvedSelector,
-                preview,
-                imageCapture,
-                videoCapture
+                useCaseGroup
             )
         } catch (e: Exception) {
             Log.e("CameraPreview", "Use case binding failed", e)
@@ -121,7 +166,13 @@ fun CameraPreviewWithUseCases(
 
     DisposableEffect(lifecycleOwner) {
         onDispose {
-            // cameraProvider?.unbindAll()
+            if (lifecycleOwner.lifecycle.currentState != androidx.lifecycle.Lifecycle.State.DESTROYED) {
+                try {
+                    cameraProvider?.unbindAll()
+                } catch (e: Exception) {
+                    Log.e("CameraPreview", "Failed to unbind on dispose", e)
+                }
+            }
         }
     }
 
