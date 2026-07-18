@@ -50,6 +50,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -60,6 +61,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
 
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
@@ -75,10 +78,11 @@ enum class CameraTimer(val label: String, val seconds: Int) {
 }
 
 enum class AspectRatioMode(val label: String, val ratio: Float?) {
-    RATIO_16_9("16:9", 16f/9f),
-    RATIO_4_3("4:3", 4f/3f),
-    RATIO_1_1("1:1", 1f),
     RATIO_9_16("9:16", 9f/16f),
+    RATIO_3_4("3:4", 3f/4f),
+    RATIO_1_1("1:1", 1f),
+    RATIO_4_3("4:3", 4f/3f),
+    RATIO_16_9("16:9", 16f/9f),
     FULL("FULL", null)
 }
 
@@ -133,6 +137,7 @@ fun CameraContent() {
     var audioSource by remember { mutableStateOf("Internal") }
     var isVirtualHorizonEnabled by remember { mutableStateOf(false) }
     var countdownValue by remember { mutableStateOf<Int?>(null) }
+    var linearZoom by remember { mutableStateOf(0f) }
     
     var isSettingsExpanded by remember { mutableStateOf(false) }
     var isoValue by remember { mutableStateOf(400f) }
@@ -182,7 +187,7 @@ fun CameraContent() {
     val imageCapture = remember(aspectRatioMode) {
         val cxRatio = when (aspectRatioMode) {
             AspectRatioMode.RATIO_16_9, AspectRatioMode.RATIO_9_16 -> androidx.camera.core.AspectRatio.RATIO_16_9
-            AspectRatioMode.RATIO_4_3 -> androidx.camera.core.AspectRatio.RATIO_4_3
+            AspectRatioMode.RATIO_4_3, AspectRatioMode.RATIO_3_4 -> androidx.camera.core.AspectRatio.RATIO_4_3
             else -> androidx.camera.core.AspectRatio.RATIO_16_9
         }
         ImageCapture.Builder()
@@ -203,12 +208,12 @@ fun CameraContent() {
             val screenWidth = constraints.maxWidth.toFloat()
             val screenHeight = constraints.maxHeight.toFloat()
             val screenRatio = if (screenHeight > 0) screenWidth / screenHeight else 1f
-            val isPortraitScreen = screenRatio < 1f
             val targetRatio = when (aspectRatioMode) {
-                AspectRatioMode.RATIO_9_16 -> if (isPortraitScreen) 9f / 16f else 16f / 9f
-                AspectRatioMode.RATIO_16_9 -> if (isPortraitScreen) 9f / 16f else 16f / 9f
-                AspectRatioMode.RATIO_4_3 -> if (isPortraitScreen) 3f / 4f else 4f / 3f
+                AspectRatioMode.RATIO_9_16 -> 9f / 16f
+                AspectRatioMode.RATIO_3_4 -> 3f / 4f
                 AspectRatioMode.RATIO_1_1 -> 1f
+                AspectRatioMode.RATIO_4_3 -> 4f / 3f
+                AspectRatioMode.RATIO_16_9 -> 16f / 9f
                 AspectRatioMode.FULL -> screenRatio
             }
 
@@ -251,6 +256,7 @@ fun CameraContent() {
                     .size(animatedWidth, animatedHeight)
                     .align(Alignment.Center)
                     .background(Color.Black)
+                    .clipToBounds()
             ) {
                 CameraPreviewWithUseCases(
                     modifier = Modifier.fillMaxSize(),
@@ -262,6 +268,7 @@ fun CameraContent() {
                     focusDistance = focusDistance,
                     isExposureLocked = isExposureLocked,
                     exposureCompensation = exposureCompensation,
+                    linearZoom = linearZoom,
                     onTapToFocus = { x, y ->
                         isExposureLocked = false
                         exposureCompensation = 0f
@@ -649,9 +656,10 @@ fun CameraContent() {
                 ) {
                     val ratios = listOf(
                         AspectRatioMode.RATIO_9_16 to "9:16",
+                        AspectRatioMode.RATIO_3_4 to "3:4",
                         AspectRatioMode.RATIO_1_1 to "1:1",
-                        AspectRatioMode.RATIO_16_9 to "16:9",
                         AspectRatioMode.RATIO_4_3 to "4:3",
+                        AspectRatioMode.RATIO_16_9 to "16:9",
                         AspectRatioMode.FULL to "FULL"
                     )
                     ratios.forEach { (mode, label) ->
@@ -703,6 +711,69 @@ fun CameraContent() {
                         .clickable { if (!isRecording) isVideoMode = true }
                         .padding(horizontal = 16.dp, vertical = 8.dp)
                 )
+            }
+
+            // Zoom Control Slider Container
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 32.dp, vertical = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // Zoom Indicator Pill
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.5f))
+                        .border(0.5.dp, Color.White.copy(alpha = 0.15f), CircleShape)
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = String.format(java.util.Locale.US, "%.1fx", 1.0f + linearZoom * 7.0f),
+                        color = com.example.ui.theme.Orange500,
+                        fontSize = 10.sp,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Filled.ZoomOut,
+                        contentDescription = "Zoom Out",
+                        tint = Color.White.copy(alpha = 0.6f),
+                        modifier = Modifier
+                            .size(20.dp)
+                            .clickable { linearZoom = (linearZoom - 0.1f).coerceIn(0f, 1f) }
+                    )
+                    
+                    Slider(
+                        value = linearZoom,
+                        onValueChange = { linearZoom = it },
+                        valueRange = 0f..1f,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 12.dp),
+                        colors = SliderDefaults.colors(
+                            thumbColor = com.example.ui.theme.Orange500,
+                            activeTrackColor = com.example.ui.theme.Orange500,
+                            inactiveTrackColor = Color.White.copy(alpha = 0.2f)
+                        )
+                    )
+                    
+                    Icon(
+                        Icons.Filled.ZoomIn,
+                        contentDescription = "Zoom In",
+                        tint = Color.White.copy(alpha = 0.6f),
+                        modifier = Modifier
+                            .size(20.dp)
+                            .clickable { linearZoom = (linearZoom + 0.1f).coerceIn(0f, 1f) }
+                    )
+                }
             }
 
             // Capture Row

@@ -42,6 +42,7 @@ fun CameraPreviewWithUseCases(
     focusDistance: Float? = null,
     isExposureLocked: Boolean = false,
     exposureCompensation: Float = 0f,
+    linearZoom: Float = 0f,
     onTapToFocus: (Float, Float) -> Unit = { _, _ -> },
     onLongPressToLock: (Float, Float) -> Unit = { _, _ -> },
     onExposureChange: (Float) -> Unit = {}
@@ -52,6 +53,15 @@ fun CameraPreviewWithUseCases(
 
     var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
     var currentCamera by remember { mutableStateOf<androidx.camera.core.Camera?>(null) }
+
+    LaunchedEffect(linearZoom, currentCamera) {
+        val camera = currentCamera ?: return@LaunchedEffect
+        try {
+            camera.cameraControl.setLinearZoom(linearZoom)
+        } catch (e: Exception) {
+            Log.e("CameraPreview", "Failed to set zoom to $linearZoom", e)
+        }
+    }
 
     LaunchedEffect(focusDistance, isExposureLocked, exposureCompensation, currentCamera) {
         val camera = currentCamera ?: return@LaunchedEffect
@@ -94,7 +104,7 @@ fun CameraPreviewWithUseCases(
 
         val cxRatio = when (aspectRatioMode) {
             AspectRatioMode.RATIO_16_9, AspectRatioMode.RATIO_9_16 -> androidx.camera.core.AspectRatio.RATIO_16_9
-            AspectRatioMode.RATIO_4_3 -> androidx.camera.core.AspectRatio.RATIO_4_3
+            AspectRatioMode.RATIO_4_3, AspectRatioMode.RATIO_3_4 -> androidx.camera.core.AspectRatio.RATIO_4_3
             else -> androidx.camera.core.AspectRatio.RATIO_16_9
         }
 
@@ -120,13 +130,13 @@ fun CameraPreviewWithUseCases(
             }
 
             val dm = context.resources.displayMetrics
-            val isPortraitScreen = dm.heightPixels > dm.widthPixels
 
             val rational = when (aspectRatioMode) {
-                AspectRatioMode.RATIO_16_9 -> if (isPortraitScreen) android.util.Rational(9, 16) else android.util.Rational(16, 9)
-                AspectRatioMode.RATIO_9_16 -> if (isPortraitScreen) android.util.Rational(9, 16) else android.util.Rational(16, 9)
-                AspectRatioMode.RATIO_4_3 -> if (isPortraitScreen) android.util.Rational(3, 4) else android.util.Rational(4, 3)
+                AspectRatioMode.RATIO_9_16 -> android.util.Rational(9, 16)
+                AspectRatioMode.RATIO_3_4 -> android.util.Rational(3, 4)
                 AspectRatioMode.RATIO_1_1 -> android.util.Rational(1, 1)
+                AspectRatioMode.RATIO_4_3 -> android.util.Rational(4, 3)
+                AspectRatioMode.RATIO_16_9 -> android.util.Rational(16, 9)
                 AspectRatioMode.FULL -> {
                     android.util.Rational(dm.widthPixels, dm.heightPixels)
                 }
@@ -184,6 +194,7 @@ fun CameraPreviewWithUseCases(
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
                 implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                scaleType = PreviewView.ScaleType.FILL_CENTER
                 val gestureDetector = android.view.GestureDetector(context, object : android.view.GestureDetector.SimpleOnGestureListener() {
                     override fun onSingleTapUp(event: android.view.MotionEvent): Boolean {
                         val factory = meteringPointFactory
