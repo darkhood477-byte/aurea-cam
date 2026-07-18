@@ -24,6 +24,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.with
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Circle
@@ -33,6 +35,7 @@ import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Grid3x3
 import androidx.compose.material.icons.filled.Grid4x4
 import androidx.compose.material.icons.filled.Details
+import androidx.compose.material.icons.filled.Edit
 
 import androidx.compose.material.icons.filled.CropPortrait
 import androidx.compose.material.icons.filled.ChangeHistory
@@ -44,6 +47,8 @@ import androidx.compose.material.icons.filled.Crop169
 import androidx.compose.material.icons.filled.Crop75
 import androidx.compose.material.icons.filled.CropSquare
 import androidx.compose.material.icons.filled.CropFree
+import androidx.compose.material.icons.filled.Exposure
+import androidx.compose.material.icons.filled.FilterCenterFocus
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -53,7 +58,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -63,6 +70,10 @@ import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
 
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
@@ -75,6 +86,13 @@ enum class CameraTimer(val label: String, val seconds: Int) {
     OFF("OFF", 0),
     SEC_3("3s", 3),
     SEC_10("10s", 10)
+}
+
+enum class UtilitySubPanel {
+    NONE,
+    ASPECT,
+    GRID,
+    MANUAL
 }
 
 enum class AspectRatioMode(val label: String, val ratio: Float?) {
@@ -122,12 +140,43 @@ fun CameraScreen() {
 @Composable
 fun CameraContent() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_BACK) }
     var compositionOverlay by remember { mutableStateOf(CompositionOverlay.NONE) }
     var isRecording by remember { mutableStateOf(false) }
     var currentRecording by remember { mutableStateOf<Recording?>(null) }
     var isVideoMode by remember { mutableStateOf(true) } // Default to video for this vlog aesthetic
     var aspectRatioMode by remember { mutableStateOf(AspectRatioMode.RATIO_9_16) }
+
+    val recorder = remember {
+        Recorder.Builder()
+            .setQualitySelector(QualitySelector.from(Quality.HIGHEST, FallbackStrategy.higherQualityOrLowerThan(Quality.SD)))
+            .build()
+    }
+    val videoCapture = remember { VideoCapture.withOutput(recorder) }
+
+    val imageCapture = remember(aspectRatioMode) {
+        val cxRatio = when (aspectRatioMode) {
+            AspectRatioMode.RATIO_16_9, AspectRatioMode.RATIO_9_16 -> androidx.camera.core.AspectRatio.RATIO_16_9
+            AspectRatioMode.RATIO_4_3, AspectRatioMode.RATIO_3_4 -> androidx.camera.core.AspectRatio.RATIO_4_3
+            else -> androidx.camera.core.AspectRatio.RATIO_16_9
+        }
+        ImageCapture.Builder()
+            .setTargetAspectRatio(cxRatio)
+            .build()
+    }
+    
+    var isGalleryOpen by remember { mutableStateOf(false) }
+    var latestMediaItem by remember { mutableStateOf<MediaItem?>(null) }
+    
+    LaunchedEffect(isGalleryOpen, isRecording) {
+        val media = queryMedia(context)
+        if (media.isNotEmpty()) {
+            latestMediaItem = media.first()
+        } else {
+            latestMediaItem = null
+        }
+    }
     
     var timerMode by remember { mutableStateOf(CameraTimer.OFF) }
     var isGlobalSettingsExpanded by remember { mutableStateOf(false) }
@@ -139,7 +188,6 @@ fun CameraContent() {
     var countdownValue by remember { mutableStateOf<Int?>(null) }
     var linearZoom by remember { mutableStateOf(0f) }
     
-    var isSettingsExpanded by remember { mutableStateOf(false) }
     var isoValue by remember { mutableStateOf(400f) }
     var shutterValue by remember { mutableStateOf(125f) }
     var wbValue by remember { mutableStateOf(5600f) }
@@ -147,6 +195,163 @@ fun CameraContent() {
     var isExposureLocked by remember { mutableStateOf(false) }
     var tapFocusPoint by remember { mutableStateOf<androidx.compose.ui.geometry.Offset?>(null) }
     var exposureCompensation by remember { mutableStateOf(0f) }
+    var activeOverlaySetting by remember { mutableStateOf<String?>(null) }
+    var lastOverlayTriggerTime by remember { mutableStateOf(0L) }
+
+    // Flip & Ghost Mode States
+    var isFrontCameraMirrored by remember { mutableStateOf(true) }
+    var isGhostOverlayEnabled by remember { mutableStateOf(false) }
+    var ghostOverlayOpacity by remember { mutableStateOf(0.4f) }
+
+    // Slate & Metadata States
+    var currentScene by remember { mutableStateOf("01") }
+    var currentTake by remember { mutableStateOf(1) }
+    var isSlateDialogExpanded by remember { mutableStateOf(false) }
+    var inputSceneName by remember { mutableStateOf("01") }
+
+    // SMPTE Dynamic Timecode Simulation
+    var recordingTimecode by remember { mutableStateOf("00:00:00:00") }
+
+    LaunchedEffect(isRecording) {
+        if (isRecording) {
+            val startTime = System.currentTimeMillis()
+            while (isRecording) {
+                val elapsed = System.currentTimeMillis() - startTime
+                val hours = (elapsed / (1000 * 60 * 60)) % 24
+                val minutes = (elapsed / (1000 * 60)) % 60
+                val seconds = (elapsed / 1000) % 60
+                val frames = (elapsed % 1000) / 41 // Approx 24 fps
+                recordingTimecode = String.format(Locale.US, "%02d:%02d:%02d:%02d", hours, minutes, seconds, frames)
+                delay(40)
+            }
+        } else {
+            recordingTimecode = "00:00:00:00"
+        }
+    }
+
+    // Physical Buttons Tactile Controller (replicating iPhone 16 Camera Control)
+    var physicalControlMode by remember { mutableStateOf("ZOOM") } // ZOOM, FOCUS, SHUTTER
+
+    LaunchedEffect(Unit) {
+        com.example.PhysicalButtonRegistry.events.collect { action ->
+            when (action) {
+                com.example.PhysicalButtonAction.VOLUME_UP -> {
+                    when (physicalControlMode) {
+                        "ZOOM" -> {
+                            linearZoom = (linearZoom + 0.05f).coerceIn(0f, 1f)
+                            activeOverlaySetting = "ZOOM"
+                            lastOverlayTriggerTime = System.currentTimeMillis()
+                        }
+                        "FOCUS" -> {
+                            val currentFocus = focusDistance ?: 0f
+                            val newFocus = (currentFocus + 0.2f).coerceIn(0f, 10.0f)
+                            focusDistance = if (newFocus < 0.1f) null else newFocus
+                            activeOverlaySetting = "FOCUS"
+                            lastOverlayTriggerTime = System.currentTimeMillis()
+                        }
+                        "SHUTTER" -> {
+                            if (countdownValue == null) {
+                                if (isVideoMode) {
+                                    if (isRecording) {
+                                        currentRecording?.stop()
+                                        isRecording = false
+                                    } else {
+                                        startVideoRecording(context, videoCapture, currentScene, currentTake, { recording ->
+                                            currentRecording = recording
+                                            isRecording = true
+                                        }) {
+                                            scope.launch {
+                                                val media = queryMedia(context)
+                                                if (media.isNotEmpty()) {
+                                                    latestMediaItem = media.first()
+                                                }
+                                            }
+                                            currentTake += 1
+                                        }
+                                    }
+                                } else {
+                                    takePhoto(context, imageCapture, currentScene, currentTake) {
+                                        scope.launch {
+                                            val media = queryMedia(context)
+                                            if (media.isNotEmpty()) {
+                                                latestMediaItem = media.first()
+                                            }
+                                        }
+                                        currentTake += 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                com.example.PhysicalButtonAction.VOLUME_DOWN -> {
+                    when (physicalControlMode) {
+                        "ZOOM" -> {
+                            linearZoom = (linearZoom - 0.05f).coerceIn(0f, 1f)
+                            activeOverlaySetting = "ZOOM"
+                            lastOverlayTriggerTime = System.currentTimeMillis()
+                        }
+                        "FOCUS" -> {
+                            val currentFocus = focusDistance ?: 0f
+                            val newFocus = (currentFocus - 0.2f).coerceIn(0f, 10.0f)
+                            focusDistance = if (newFocus < 0.1f) null else newFocus
+                            activeOverlaySetting = "FOCUS"
+                            lastOverlayTriggerTime = System.currentTimeMillis()
+                        }
+                        "SHUTTER" -> {
+                            if (countdownValue == null) {
+                                if (isVideoMode) {
+                                    if (isRecording) {
+                                        currentRecording?.stop()
+                                        isRecording = false
+                                    } else {
+                                        startVideoRecording(context, videoCapture, currentScene, currentTake, { recording ->
+                                            currentRecording = recording
+                                            isRecording = true
+                                        }) {
+                                            scope.launch {
+                                                val media = queryMedia(context)
+                                                if (media.isNotEmpty()) {
+                                                    latestMediaItem = media.first()
+                                                }
+                                            }
+                                            currentTake += 1
+                                        }
+                                    }
+                                } else {
+                                    takePhoto(context, imageCapture, currentScene, currentTake) {
+                                        scope.launch {
+                                            val media = queryMedia(context)
+                                            if (media.isNotEmpty()) {
+                                                latestMediaItem = media.first()
+                                            }
+                                        }
+                                        currentTake += 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                com.example.PhysicalButtonAction.VOLUME_UP_LONG, com.example.PhysicalButtonAction.VOLUME_DOWN_LONG -> {
+                    physicalControlMode = when (physicalControlMode) {
+                        "ZOOM" -> "FOCUS"
+                        "FOCUS" -> "SHUTTER"
+                        else -> "ZOOM"
+                    }
+                    activeOverlaySetting = "PHYSICAL_$physicalControlMode"
+                    lastOverlayTriggerTime = System.currentTimeMillis()
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(activeOverlaySetting, lastOverlayTriggerTime) {
+        if (activeOverlaySetting != null) {
+            kotlinx.coroutines.delay(2000)
+            activeOverlaySetting = null
+        }
+    }
     val focusPulseRadius = remember { androidx.compose.animation.core.Animatable(0f) }
     val focusPulseAlpha = remember { androidx.compose.animation.core.Animatable(1f) }
     
@@ -175,8 +380,6 @@ fun CameraContent() {
         }
     }
     
-    val scope = rememberCoroutineScope()
-
     val cameraSelector = remember(lensFacing) {
         try {
             CameraSelector.Builder().requireLensFacing(lensFacing).build()
@@ -184,24 +387,6 @@ fun CameraContent() {
             CameraSelector.DEFAULT_BACK_CAMERA
         }
     }
-    val imageCapture = remember(aspectRatioMode) {
-        val cxRatio = when (aspectRatioMode) {
-            AspectRatioMode.RATIO_16_9, AspectRatioMode.RATIO_9_16 -> androidx.camera.core.AspectRatio.RATIO_16_9
-            AspectRatioMode.RATIO_4_3, AspectRatioMode.RATIO_3_4 -> androidx.camera.core.AspectRatio.RATIO_4_3
-            else -> androidx.camera.core.AspectRatio.RATIO_16_9
-        }
-        ImageCapture.Builder()
-            .setTargetAspectRatio(cxRatio)
-            .build()
-    }
-    
-    val recorder = remember {
-        Recorder.Builder()
-            .setQualitySelector(QualitySelector.from(Quality.HIGHEST, FallbackStrategy.higherQualityOrLowerThan(Quality.SD)))
-            .build()
-    }
-    val videoCapture = remember { VideoCapture.withOutput(recorder) }
-
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         // Main camera preview area
          BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -259,7 +444,9 @@ fun CameraContent() {
                     .clipToBounds()
             ) {
                 CameraPreviewWithUseCases(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxSize().graphicsLayer {
+                        scaleX = if (lensFacing == CameraSelector.LENS_FACING_FRONT && isFrontCameraMirrored) -1f else 1f
+                    },
                     cameraSelector = cameraSelector,
                     imageCapture = imageCapture,
                     videoCapture = videoCapture,
@@ -269,6 +456,9 @@ fun CameraContent() {
                     isExposureLocked = isExposureLocked,
                     exposureCompensation = exposureCompensation,
                     linearZoom = linearZoom,
+                    isoValue = isoValue,
+                    shutterValue = shutterValue,
+                    wbValue = wbValue,
                     onTapToFocus = { x, y ->
                         isExposureLocked = false
                         exposureCompensation = 0f
@@ -280,8 +470,142 @@ fun CameraContent() {
                     },
                     onExposureChange = { dy ->
                         exposureCompensation = (exposureCompensation - dy * 0.05f).coerceIn(-12f, 12f)
+                        activeOverlaySetting = "EXPOSURE"
+                        lastOverlayTriggerTime = System.currentTimeMillis()
+                    },
+                    onFocusDistanceChange = { dx ->
+                        val currentFocus = focusDistance ?: 0f
+                        val newFocus = (currentFocus - dx * 0.015f).coerceIn(0f, 10f)
+                        focusDistance = if (newFocus < 0.1f) null else newFocus
+                        activeOverlaySetting = "FOCUS"
+                        lastOverlayTriggerTime = System.currentTimeMillis()
                     }
                 )
+
+                // Viewfinder Sidebar HUD Controls
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .padding(start = 12.dp)
+                        .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+                        .padding(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // Mirror Preview Toggle (Only available on Front Camera)
+                    if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
+                        IconButton(
+                            onClick = { isFrontCameraMirrored = !isFrontCameraMirrored },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Cameraswitch,
+                                contentDescription = "Mirror Preview",
+                                tint = if (isFrontCameraMirrored) com.example.ui.theme.Orange500 else Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+
+                    // Ghost Overlay Toggle
+                    IconButton(
+                        onClick = { isGhostOverlayEnabled = !isGhostOverlayEnabled },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Details,
+                            contentDescription = "Ghost Mode Overlay",
+                            tint = if (isGhostOverlayEnabled) com.example.ui.theme.Orange500 else Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    // Ghost Opacity Selector (Expanded only when Ghost is active)
+                    if (isGhostOverlayEnabled) {
+                        Box(modifier = Modifier.width(20.dp).height(1.dp).background(Color.White.copy(alpha = 0.3f)))
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text("OPAC", color = Color.Gray, fontSize = 7.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            listOf(0.2f, 0.4f, 0.6f, 0.8f).forEach { opacity ->
+                                val isSelected = Math.abs(ghostOverlayOpacity - opacity) < 0.05f
+                                Box(
+                                    modifier = Modifier
+                                        .size(22.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isSelected) com.example.ui.theme.Orange500 else Color.Transparent)
+                                        .clickable { ghostOverlayOpacity = opacity },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "${(opacity * 100).toInt()}",
+                                        color = if (isSelected) Color.Black else Color.White,
+                                        fontSize = 8.sp,
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Tactile Controls Mode Quick Selector
+                    Box(modifier = Modifier.width(20.dp).height(1.dp).background(Color.White.copy(alpha = 0.3f)))
+                    IconButton(
+                        onClick = {
+                            physicalControlMode = when (physicalControlMode) {
+                                "ZOOM" -> "FOCUS"
+                                "FOCUS" -> "SHUTTER"
+                                else -> "ZOOM"
+                            }
+                            activeOverlaySetting = "PHYSICAL_$physicalControlMode"
+                            lastOverlayTriggerTime = System.currentTimeMillis()
+                        },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = when(physicalControlMode) {
+                                "ZOOM" -> Icons.Filled.ZoomIn
+                                "FOCUS" -> Icons.Filled.FilterCenterFocus
+                                else -> Icons.Filled.PhotoCamera
+                            },
+                            contentDescription = "Physical Control Mode",
+                            tint = com.example.ui.theme.Orange500,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
+                // Ghost Overlay Layer (vlog frame matching)
+                if (isGhostOverlayEnabled) {
+                    val ghostUri = latestMediaItem?.uri
+                    if (ghostUri != null) {
+                        coil.compose.AsyncImage(
+                            model = ghostUri,
+                            contentDescription = "Ghost Overlay",
+                            alpha = ghostOverlayOpacity,
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                            modifier = Modifier.matchParentSize().graphicsLayer {
+                                scaleX = if (lensFacing == CameraSelector.LENS_FACING_FRONT && isFrontCameraMirrored) -1f else 1f
+                            }
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                "Ghost Mode Active\nTake a photo to use as overlay",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                }
 
                 // Virtual Horizon inside active viewport
                 if (isVirtualHorizonEnabled) {
@@ -361,6 +685,120 @@ fun CameraContent() {
                     }
                 }
 
+                // Contextual Gesture HUD Overlay
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = activeOverlaySetting != null,
+                    enter = androidx.compose.animation.fadeIn(),
+                    exit = androidx.compose.animation.fadeOut(),
+                    modifier = Modifier.align(Alignment.Center)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.Black.copy(alpha = 0.75f))
+                            .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 20.dp, vertical = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            if (activeOverlaySetting == "EXPOSURE") {
+                                Icon(
+                                    imageVector = Icons.Filled.Exposure,
+                                    contentDescription = "Exposure compensation",
+                                    tint = com.example.ui.theme.Orange500,
+                                    modifier = Modifier.size(32.dp)
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = String.format(Locale.US, "EV %+.1f", exposureCompensation),
+                                    color = Color.White,
+                                    fontSize = 18.sp,
+                                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Swipe Vertically to Adjust",
+                                    color = Color.Gray,
+                                    fontSize = 11.sp
+                                )
+                            } else if (activeOverlaySetting == "FOCUS") {
+                                Icon(
+                                    imageVector = Icons.Filled.FilterCenterFocus,
+                                    contentDescription = "Focus distance",
+                                    tint = com.example.ui.theme.Orange500,
+                                    modifier = Modifier.size(32.dp)
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                val isAuto = focusDistance == null
+                                Text(
+                                    text = if (isAuto) "FOCUS: AUTO (AF)" else String.format(Locale.US, "FOCUS: MF (%.2f)", focusDistance),
+                                    color = Color.White,
+                                    fontSize = 18.sp,
+                                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Swipe Horizontally to Adjust",
+                                    color = Color.Gray,
+                                    fontSize = 11.sp
+                                )
+                            } else if (activeOverlaySetting?.startsWith("PHYSICAL_") == true) {
+                                val mode = activeOverlaySetting?.removePrefix("PHYSICAL_") ?: "ZOOM"
+                                Icon(
+                                    imageVector = when(mode) {
+                                        "ZOOM" -> Icons.Filled.ZoomIn
+                                        "FOCUS" -> Icons.Filled.FilterCenterFocus
+                                        else -> Icons.Filled.PhotoCamera
+                                    },
+                                    contentDescription = "Physical Mode",
+                                    tint = com.example.ui.theme.Orange500,
+                                    modifier = Modifier.size(32.dp)
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "PHYSICAL CONTROL: $mode",
+                                    color = Color.White,
+                                    fontSize = 15.sp,
+                                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = when(mode) {
+                                        "ZOOM" -> "VOL +: ZOOM IN | VOL -: ZOOM OUT"
+                                        "FOCUS" -> "VOL +: FOCUS IN | VOL -: FOCUS OUT"
+                                        else -> "VOL +/-: SHUTTER (CAPTURE/RECORD)"
+                                    },
+                                    color = Color.Gray,
+                                    fontSize = 11.sp
+                                )
+                            } else if (activeOverlaySetting == "ZOOM") {
+                                Icon(
+                                    imageVector = Icons.Filled.ZoomIn,
+                                    contentDescription = "Zoom level",
+                                    tint = com.example.ui.theme.Orange500,
+                                    modifier = Modifier.size(32.dp)
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = String.format(Locale.US, "ZOOM: %.2fx", 1f + linearZoom * 9f),
+                                    color = Color.White,
+                                    fontSize = 18.sp,
+                                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "VOL +/- or Dial to Adjust",
+                                    color = Color.Gray,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // Stabilization active text centered at the bottom of active viewport
                 Column(
                     modifier = Modifier
@@ -378,97 +816,7 @@ fun CameraContent() {
                 }
             }
 
-        // Left side settings panel
-            Row(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(top = 80.dp, start = 16.dp)
-            ) {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    listOf(
-                        "ISO" to isoValue.toInt().toString(), 
-                        "SHUTTER" to "1/${shutterValue.toInt()}", 
-                        "WB" to "${wbValue.toInt()}K",
-                        "FOCUS" to if (focusDistance == null) "AF" else "MF",
-                        "METER" to "MATRIX"
-                    ).forEach { (label, value) ->
-                        Column(
-                            modifier = Modifier
-                                .clip(MaterialTheme.shapes.small)
-                                .background(Color.Black.copy(alpha = 0.4f))
-                                .clickable { isSettingsExpanded = !isSettingsExpanded }
-                                .padding(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(label, color = com.example.ui.theme.Neutral400, fontSize = 9.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = 0.5.sp)
-                            Text(value, color = Color.White, fontSize = 12.sp)
-                        }
-                    }
-                }
-                
-                androidx.compose.animation.AnimatedVisibility(
-                    visible = isSettingsExpanded,
-                    enter = androidx.compose.animation.expandHorizontally(expandFrom = Alignment.Start) + androidx.compose.animation.fadeIn(),
-                    exit = androidx.compose.animation.shrinkHorizontally(shrinkTowards = Alignment.Start) + androidx.compose.animation.fadeOut()
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .padding(start = 16.dp)
-                            .clip(MaterialTheme.shapes.medium)
-                            .background(Color.Black.copy(alpha = 0.6f))
-                            .padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(24.dp)
-                    ) {
-                        // ISO Slider
-                        Column {
-                            Text("ISO: ${isoValue.toInt()}", color = Color.White, fontSize = 10.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
-                            Slider(
-                                value = isoValue,
-                                onValueChange = { isoValue = it },
-                                valueRange = 100f..3200f,
-                                modifier = Modifier.width(160.dp),
-                                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = com.example.ui.theme.Orange500)
-                            )
-                        }
-                        // Shutter Slider
-                        Column {
-                            Text("SHUTTER: 1/${shutterValue.toInt()}", color = Color.White, fontSize = 10.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
-                            Slider(
-                                value = shutterValue,
-                                onValueChange = { shutterValue = it },
-                                valueRange = 30f..1000f,
-                                modifier = Modifier.width(160.dp),
-                                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = com.example.ui.theme.Orange500)
-                            )
-                        }
-                        // WB Slider
-                        Column {
-                            Text("WB: ${wbValue.toInt()}K", color = Color.White, fontSize = 10.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
-                            Slider(
-                                value = wbValue,
-                                onValueChange = { wbValue = it },
-                                valueRange = 2000f..8000f,
-                                modifier = Modifier.width(160.dp),
-                                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = com.example.ui.theme.Orange500)
-                            )
-                        }
-                        // Focus Slider
-                        Column {
-                            Text("FOCUS: ${if (focusDistance == null) "AUTO" else String.format(java.util.Locale.US, "%.2f", focusDistance)}", color = Color.White, fontSize = 10.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
-                            Slider(
-                                value = focusDistance ?: 0f,
-                                onValueChange = { focusDistance = if (it < 0.1f) null else it },
-                                valueRange = 0f..10f,
-                                modifier = Modifier.width(160.dp),
-                                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = com.example.ui.theme.Orange500)
-                            )
-                        }
 
-                    }
-                }
-            }
 
             // Right side exposure slider
             Column(
@@ -525,18 +873,27 @@ fun CameraContent() {
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Color.Black.copy(alpha = 0.6f))
+                .windowInsetsPadding(WindowInsets.statusBars)
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
-                Text("PROJECT", color = com.example.ui.theme.Neutral500, fontSize = 10.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = 2.sp)
-                Text("VLOG_042_NYC", color = Color.White, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+            Column(
+                modifier = Modifier.clickable {
+                    inputSceneName = currentScene
+                    isSlateDialogExpanded = true
+                }
+            ) {
+                Text("SLATE (SCENE/TAKE)", color = com.example.ui.theme.Neutral500, fontSize = 10.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = 2.sp)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("S: $currentScene | T: $currentTake", color = com.example.ui.theme.Orange500, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                    Icon(Icons.Filled.Edit, contentDescription = "Edit Slate", tint = com.example.ui.theme.Orange500, modifier = Modifier.size(12.dp))
+                }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(24.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(horizontalAlignment = Alignment.End) {
                     Text("REC TIME", color = com.example.ui.theme.Neutral500, fontSize = 10.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = 2.sp)
-                    Text("00:12:44:02", color = if (isRecording) com.example.ui.theme.Red500 else Color.White, fontSize = 14.sp)
+                    Text(recordingTimecode, color = if (isRecording) com.example.ui.theme.Red500 else Color.White, fontSize = 14.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
                 }
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -589,7 +946,7 @@ fun CameraContent() {
             )
         }
         
-        // Footer
+        // Footer (Unified Creative Control Deck)
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -598,220 +955,135 @@ fun CameraContent() {
                     brush = androidx.compose.ui.graphics.Brush.verticalGradient(
                         colors = listOf(
                             Color.Transparent,
-                            Color.Black.copy(alpha = 0.6f)
+                            Color.Black.copy(alpha = 0.85f)
                         )
                     )
                 )
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(bottom = 12.dp)
         ) {
-            // Overlays Selector Row
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 16.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                val overlays = listOf(
-                    "THIRDS" to (CompositionOverlay.RULE_OF_THIRDS to Icons.Filled.Grid3x3),
-                    "PHI GRID" to (CompositionOverlay.GOLDEN_RATIO to Icons.Filled.Grid4x4),
-                    "SPIRAL" to (CompositionOverlay.GOLDEN_SPIRAL to Icons.Filled.Circle),
-                    "TRIANGLE" to (CompositionOverlay.GOLDEN_TRIANGLE to Icons.Filled.ChangeHistory),
-                    "SYMMETRY" to (CompositionOverlay.DYNAMIC_SYMMETRY to Icons.Filled.Details)
-                )
-                
-                overlays.forEach { (label, pair) ->
-                    val overlay = pair.first
-                    val icon = pair.second
-                    val isActive = compositionOverlay == overlay
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .clickable { 
-                                compositionOverlay = if (isActive) CompositionOverlay.NONE else overlay 
-                            }
-                            .padding(8.dp)
-                    ) {
-                        Icon(icon, contentDescription = label, tint = if (isActive) com.example.ui.theme.Orange500 else Color.White.copy(alpha = 0.4f), modifier = Modifier.size(24.dp))
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(label, color = if (isActive) com.example.ui.theme.Orange500 else Color.White.copy(alpha = 0.4f), fontSize = 9.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
-                    }
-                }
-            }
+            // 1. Collapsible Camera Control Strip
+            CameraControlsStrip(
+                compositionOverlay = compositionOverlay,
+                onOverlayChange = { compositionOverlay = it },
+                aspectRatioMode = aspectRatioMode,
+                onAspectRatioChange = { aspectRatioMode = it },
+                isVirtualHorizonEnabled = isVirtualHorizonEnabled,
+                onHorizonToggle = { isVirtualHorizonEnabled = !isVirtualHorizonEnabled },
+                isoValue = isoValue,
+                onIsoChange = { isoValue = it },
+                shutterValue = shutterValue,
+                onShutterChange = { shutterValue = it },
+                wbValue = wbValue,
+                onWbChange = { wbValue = it },
+                focusDistance = focusDistance,
+                onFocusChange = { focusDistance = it },
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
 
-            // Dedicated Aspect Ratio Segmented Picker Control
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.4f))
-                        .border(1.dp, Color.White.copy(alpha = 0.15f), CircleShape)
-                        .padding(4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    val ratios = listOf(
-                        AspectRatioMode.RATIO_9_16 to "9:16",
-                        AspectRatioMode.RATIO_3_4 to "3:4",
-                        AspectRatioMode.RATIO_1_1 to "1:1",
-                        AspectRatioMode.RATIO_4_3 to "4:3",
-                        AspectRatioMode.RATIO_16_9 to "16:9",
-                        AspectRatioMode.FULL to "FULL"
-                    )
-                    ratios.forEach { (mode, label) ->
-                        val isSelected = aspectRatioMode == mode
-                        Box(
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(if (isSelected) com.example.ui.theme.Orange500 else Color.Transparent)
-                                .clickable { aspectRatioMode = mode }
-                                .padding(horizontal = 14.dp, vertical = 6.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = label,
-                                color = if (isSelected) Color.Black else Color.White.copy(alpha = 0.7f),
-                                fontSize = 10.sp,
-                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-            }
+            // 2. iPhone-Style Tactile Zoom Ruler & Pills
+            ZoomDial(
+                linearZoom = linearZoom,
+                onZoomChange = { linearZoom = it },
+                modifier = Modifier.padding(vertical = 4.dp)
+            )
 
-            // Mode Switcher
+            // 3. Mode Switcher (PHOTO / VIDEO)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 12.dp),
+                    .padding(vertical = 8.dp),
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     "PHOTO",
-                    color = if (!isVideoMode) com.example.ui.theme.Orange500 else Color.White.copy(alpha = 0.5f),
+                    color = if (!isVideoMode) com.example.ui.theme.Orange500 else Color.White.copy(alpha = 0.4f),
                     fontSize = 12.sp,
                     fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-                    letterSpacing = 1.sp,
+                    letterSpacing = 1.5.sp,
                     modifier = Modifier
                         .clickable { if (!isRecording) isVideoMode = false }
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
                 )
                 Text(
                     "VIDEO",
-                    color = if (isVideoMode) com.example.ui.theme.Orange500 else Color.White.copy(alpha = 0.5f),
+                    color = if (isVideoMode) com.example.ui.theme.Orange500 else Color.White.copy(alpha = 0.4f),
                     fontSize = 12.sp,
                     fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-                    letterSpacing = 1.sp,
+                    letterSpacing = 1.5.sp,
                     modifier = Modifier
                         .clickable { if (!isRecording) isVideoMode = true }
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
                 )
             }
 
-            // Zoom Control Slider Container
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 32.dp, vertical = 4.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                // Zoom Indicator Pill
-                Box(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .border(0.5.dp, Color.White.copy(alpha = 0.15f), CircleShape)
-                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                ) {
-                    Text(
-                        text = String.format(java.util.Locale.US, "%.1fx", 1.0f + linearZoom * 7.0f),
-                        color = com.example.ui.theme.Orange500,
-                        fontSize = 10.sp,
-                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
-                    )
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Filled.ZoomOut,
-                        contentDescription = "Zoom Out",
-                        tint = Color.White.copy(alpha = 0.6f),
-                        modifier = Modifier
-                            .size(20.dp)
-                            .clickable { linearZoom = (linearZoom - 0.1f).coerceIn(0f, 1f) }
-                    )
-                    
-                    Slider(
-                        value = linearZoom,
-                        onValueChange = { linearZoom = it },
-                        valueRange = 0f..1f,
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(horizontal = 12.dp),
-                        colors = SliderDefaults.colors(
-                            thumbColor = com.example.ui.theme.Orange500,
-                            activeTrackColor = com.example.ui.theme.Orange500,
-                            inactiveTrackColor = Color.White.copy(alpha = 0.2f)
-                        )
-                    )
-                    
-                    Icon(
-                        Icons.Filled.ZoomIn,
-                        contentDescription = "Zoom In",
-                        tint = Color.White.copy(alpha = 0.6f),
-                        modifier = Modifier
-                            .size(20.dp)
-                            .clickable { linearZoom = (linearZoom + 0.1f).coerceIn(0f, 1f) }
-                    )
-                }
-            }
-
-            // Capture Row
+            // 4. Primary Capture Row
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 32.dp, vertical = 24.dp),
+                    .padding(horizontal = 32.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Gallery Icon Mock
+                // Gallery Thumbnail Button
                 Box(
                     modifier = Modifier
                         .size(48.dp)
-                        .clip(MaterialTheme.shapes.medium)
+                        .clip(CircleShape)
                         .background(com.example.ui.theme.Neutral800)
-                        .clickable { /* TODO: Open gallery */ },
+                        .border(1.dp, Color.White.copy(alpha = 0.2f), CircleShape)
+                        .testTag("gallery_button")
+                        .clickable { isGalleryOpen = true },
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Filled.Image, contentDescription = "Gallery", tint = com.example.ui.theme.Neutral500)
+                    val currentLatestItem = latestMediaItem
+                    if (currentLatestItem != null) {
+                        coil.compose.AsyncImage(
+                            model = currentLatestItem.uri,
+                            contentDescription = "Gallery Thumbnail",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                        )
+                    } else {
+                        Icon(Icons.Filled.Image, contentDescription = "Gallery", tint = com.example.ui.theme.Neutral500)
+                    }
                 }
 
-                // Shutter
+                // Main Shutter
                 Box(
                     modifier = Modifier
-                        .size(80.dp)
+                        .size(76.dp)
                         .clip(CircleShape)
                         .clickable {
                             if (countdownValue != null) return@clickable // Ignore clicks during countdown
                             
                             val startAction = {
                                 if (isVideoMode) {
-                                    startVideoRecording(context, videoCapture) { recording ->
+                                    startVideoRecording(context, videoCapture, currentScene, currentTake, { recording ->
                                         currentRecording = recording
                                         isRecording = true
+                                    }) {
+                                        // On Video Saved
+                                        scope.launch {
+                                            val media = queryMedia(context)
+                                            if (media.isNotEmpty()) {
+                                                latestMediaItem = media.first()
+                                            }
+                                        }
+                                        currentTake += 1
                                     }
                                 } else {
-                                    takePhoto(context, imageCapture)
+                                    takePhoto(context, imageCapture, currentScene, currentTake) {
+                                        // On Photo Saved
+                                        scope.launch {
+                                            val media = queryMedia(context)
+                                            if (media.isNotEmpty()) {
+                                                latestMediaItem = media.first()
+                                            }
+                                        }
+                                        currentTake += 1
+                                    }
                                 }
                             }
                             
@@ -834,16 +1106,16 @@ fun CameraContent() {
                     contentAlignment = Alignment.Center
                 ) {
                     // Glow effect
-                    val glowColor = if (isVideoMode) com.example.ui.theme.Red500.copy(alpha = 0.2f) else Color.White.copy(alpha = 0.2f)
-                    Box(modifier = Modifier.size(80.dp).clip(CircleShape).background(glowColor))
+                    val glowColor = if (isVideoMode) com.example.ui.theme.Red500.copy(alpha = 0.15f) else Color.White.copy(alpha = 0.15f)
+                    Box(modifier = Modifier.size(76.dp).clip(CircleShape).background(glowColor))
                     // White border
-                    Box(modifier = Modifier.size(64.dp).clip(CircleShape).background(Color.White), contentAlignment = Alignment.Center) {
+                    Box(modifier = Modifier.size(62.dp).clip(CircleShape).background(Color.White), contentAlignment = Alignment.Center) {
                         // Inner Black Gap
-                        Box(modifier = Modifier.size(60.dp).clip(CircleShape).background(Color.Black), contentAlignment = Alignment.Center) {
+                        Box(modifier = Modifier.size(58.dp).clip(CircleShape).background(Color.Black), contentAlignment = Alignment.Center) {
                             // Core
                             Box(
                                 modifier = Modifier
-                                    .size(if (isRecording) 28.dp else 52.dp)
+                                    .size(if (isRecording) 24.dp else 50.dp)
                                     .clip(if (isRecording) MaterialTheme.shapes.small else CircleShape)
                                     .background(if (isVideoMode) com.example.ui.theme.Red600 else Color.White)
                             )
@@ -856,6 +1128,7 @@ fun CameraContent() {
                     modifier = Modifier
                         .size(48.dp)
                         .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.1f))
                         .clickable { lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK },
                     contentAlignment = Alignment.Center
                 ) {
@@ -864,10 +1137,112 @@ fun CameraContent() {
             }
         }
     }
+
+    if (isGalleryOpen) {
+        MediaGalleryScreen(onClose = { isGalleryOpen = false })
+    }
+
+    if (isSlateDialogExpanded) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { isSlateDialogExpanded = false },
+            title = {
+                Text(
+                    text = "Edit Slate (Scene/Take Metadata)",
+                    color = Color.White,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Text(
+                        text = "Customize current scene name and take number to automatically tag recorded video and image clips.",
+                        color = Color.Gray,
+                        fontSize = 13.sp
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = inputSceneName,
+                        onValueChange = { inputSceneName = it },
+                        label = { Text("Scene ID / Name") },
+                        colors = androidx.compose.material3.TextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            focusedLabelColor = com.example.ui.theme.Orange500,
+                            unfocusedLabelColor = Color.Gray,
+                            focusedIndicatorColor = com.example.ui.theme.Orange500,
+                            unfocusedIndicatorColor = Color.Gray
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Take Number", color = Color.White, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            androidx.compose.material3.FilledIconButton(
+                                onClick = { if (currentTake > 1) currentTake -= 1 },
+                                colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = Color.White.copy(alpha = 0.15f)
+                                ),
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Text("-", color = Color.White, fontSize = 18.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            }
+                            Text(
+                                text = "$currentTake",
+                                color = com.example.ui.theme.Orange500,
+                                fontSize = 18.sp,
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                            )
+                            androidx.compose.material3.FilledIconButton(
+                                onClick = { currentTake += 1 },
+                                colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = Color.White.copy(alpha = 0.15f)
+                                ),
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Text("+", color = Color.White, fontSize = 18.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        currentScene = inputSceneName.ifBlank { "01" }
+                        isSlateDialogExpanded = false
+                    }
+                ) {
+                    Text("Apply Slate", color = com.example.ui.theme.Orange500, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { isSlateDialogExpanded = false }) {
+                    Text("Cancel", color = Color.LightGray)
+                }
+            },
+            containerColor = Color(0xFF1E1E24)
+        )
+    }
 }
 
-private fun takePhoto(context: Context, imageCapture: ImageCapture) {
-    val name = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US).format(System.currentTimeMillis())
+private fun takePhoto(
+    context: Context,
+    imageCapture: ImageCapture,
+    scene: String,
+    take: Int,
+    onPhotoSaved: () -> Unit
+) {
+    val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())
+    val name = "VLOG_S${scene}_T${take}_$timestamp"
     // For simplicity, we just save to app's files directory or media store.
     // In a real app we'd use MediaStore to save to gallery.
     val contentValues = android.content.ContentValues().apply {
@@ -891,8 +1266,9 @@ private fun takePhoto(context: Context, imageCapture: ImageCapture) {
             }
             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                 val msg = "Photo capture succeeded: ${output.savedUri}"
-                Toast.makeText(context, "Saved Photo", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Saved Photo: S${scene} T${take}", Toast.LENGTH_LONG).show()
                 Log.d("CameraScreen", msg)
+                onPhotoSaved()
             }
         }
     )
@@ -901,9 +1277,13 @@ private fun takePhoto(context: Context, imageCapture: ImageCapture) {
 private fun startVideoRecording(
     context: Context,
     videoCapture: VideoCapture<Recorder>,
-    onRecordingStarted: (Recording) -> Unit
+    scene: String,
+    take: Int,
+    onRecordingStarted: (Recording) -> Unit,
+    onVideoSaved: () -> Unit
 ) {
-    val name = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US).format(System.currentTimeMillis())
+    val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())
+    val name = "VLOG_S${scene}_T${take}_$timestamp"
     val contentValues = android.content.ContentValues().apply {
         put(android.provider.MediaStore.Video.Media.DISPLAY_NAME, name)
     }
@@ -926,8 +1306,9 @@ private fun startVideoRecording(
                     is VideoRecordEvent.Finalize -> {
                         if (!recordEvent.hasError()) {
                             val msg = "Video capture succeeded: ${recordEvent.outputResults.outputUri}"
-                            Toast.makeText(context, "Saved Video", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Saved Video: S${scene} T${take}", Toast.LENGTH_LONG).show()
                             Log.d("CameraScreen", msg)
+                            onVideoSaved()
                         } else {
                             Log.e("CameraScreen", "Video capture ends with error: ${recordEvent.error}")
                         }
@@ -937,5 +1318,490 @@ private fun startVideoRecording(
         onRecordingStarted(recording)
     } catch (e: SecurityException) {
         Log.e("CameraScreen", "SecurityException creating recording", e)
+    }
+}
+
+@Composable
+fun ZoomDial(
+    linearZoom: Float,
+    onZoomChange: (Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var isDragging by remember { mutableStateOf(false) }
+    
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // Zoom Value Badge
+        Box(
+            modifier = Modifier
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.6f))
+                .border(1.dp, Color.White.copy(alpha = 0.15f), CircleShape)
+                .padding(horizontal = 12.dp, vertical = 4.dp)
+        ) {
+            Text(
+                text = String.format(Locale.US, "%.1fx", 1.0f + linearZoom * 7.0f),
+                color = com.example.ui.theme.Orange500,
+                fontSize = 11.sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                letterSpacing = 0.5.sp
+            )
+        }
+
+        // Ticks Ruler Canvas with Drag Gesture (iPhone style slider wheel dial)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(44.dp)
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { isDragging = true },
+                        onDragEnd = { isDragging = false },
+                        onDragCancel = { isDragging = false },
+                        onHorizontalDrag = { change, dragAmount ->
+                            change.consume()
+                            // Drag sensitivity: 400 pixels across the screen is full range
+                            val sensitivity = 400f
+                            val newZoom = (linearZoom + dragAmount / sensitivity).coerceIn(0f, 1f)
+                            onZoomChange(newZoom)
+                        }
+                    )
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val width = size.width
+                val height = size.height
+                val centerX = width / 2
+                
+                val tickCount = 40
+                val tickSpacing = 16.dp.toPx()
+                val currentOffset = linearZoom * (tickCount * tickSpacing)
+                
+                for (i in 0..tickCount) {
+                    val tickZoomValue = i.toFloat() / tickCount
+                    val tickOffset = i * tickSpacing - currentOffset
+                    val x = centerX + tickOffset
+                    
+                    if (x >= 0 && x <= width) {
+                        val isMajor = i % 5 == 0
+                        val isSemiMajor = i % 5 != 0 && i % 2 == 0
+                        
+                        val tickHeight = when {
+                            isMajor -> 20.dp.toPx()
+                            isSemiMajor -> 12.dp.toPx()
+                            else -> 8.dp.toPx()
+                        }
+                        
+                        val tickAlpha = when {
+                            x < centerX -> (x / centerX).coerceIn(0f, 1f)
+                            else -> ((width - x) / (width - centerX)).coerceIn(0f, 1f)
+                        }
+                        
+                        val tickColor = if (isMajor) Color.White else Color.White.copy(alpha = 0.4f)
+                        
+                        drawLine(
+                            color = tickColor.copy(alpha = tickAlpha),
+                            start = androidx.compose.ui.geometry.Offset(x, height - tickHeight),
+                            end = androidx.compose.ui.geometry.Offset(x, height),
+                            strokeWidth = if (isMajor) 2f else 1f
+                        )
+                    }
+                }
+                
+                // Central Fixed Orange Indicator Line
+                drawLine(
+                    color = com.example.ui.theme.Orange500,
+                    start = androidx.compose.ui.geometry.Offset(centerX, height - 28.dp.toPx()),
+                    end = androidx.compose.ui.geometry.Offset(centerX, height),
+                    strokeWidth = 3f
+                )
+            }
+        }
+
+        // Quick Jump Pills Row (iPhone Style Shortcuts)
+        Row(
+            modifier = Modifier.padding(top = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val levels = listOf(
+                "1x" to 0f,
+                "2x" to 1f / 7f,
+                "5x" to 4f / 7f,
+                "8x" to 1f
+            )
+            
+            levels.forEach { (label, value) ->
+                val isSelected = kotlin.math.abs(linearZoom - value) < 0.05f
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isSelected) com.example.ui.theme.Orange500 
+                            else Color.Black.copy(alpha = 0.5f)
+                        )
+                        .border(
+                            width = 1.dp,
+                            color = if (isSelected) Color.Transparent else Color.White.copy(alpha = 0.15f),
+                            shape = CircleShape
+                        )
+                        .clickable { onZoomChange(value) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        color = if (isSelected) Color.Black else Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(androidx.compose.animation.ExperimentalAnimationApi::class)
+@Composable
+fun CameraControlsStrip(
+    compositionOverlay: CompositionOverlay,
+    onOverlayChange: (CompositionOverlay) -> Unit,
+    aspectRatioMode: AspectRatioMode,
+    onAspectRatioChange: (AspectRatioMode) -> Unit,
+    isVirtualHorizonEnabled: Boolean,
+    onHorizonToggle: () -> Unit,
+    isoValue: Float,
+    onIsoChange: (Float) -> Unit,
+    shutterValue: Float,
+    onShutterChange: (Float) -> Unit,
+    wbValue: Float,
+    onWbChange: (Float) -> Unit,
+    focusDistance: Float?,
+    onFocusChange: (Float?) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var activeSubPanel by remember { mutableStateOf(UtilitySubPanel.NONE) }
+    var activeManualParam by remember { mutableStateOf("ISO") }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // Expanded Panel Content
+        androidx.compose.animation.AnimatedContent(
+            targetState = activeSubPanel,
+            transitionSpec = {
+                androidx.compose.animation.fadeIn(animationSpec = androidx.compose.animation.core.tween(200)) with
+                androidx.compose.animation.fadeOut(animationSpec = androidx.compose.animation.core.tween(200))
+            },
+            label = "subPanelTransition"
+        ) { panel ->
+            when (panel) {
+                UtilitySubPanel.NONE -> {
+                    // Minimalist default strip
+                    Row(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.5f))
+                            .border(1.dp, Color.White.copy(alpha = 0.12f), CircleShape)
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        UtilityIconButton(
+                            icon = Icons.Filled.Grid3x3,
+                            label = "GRID",
+                            isActive = compositionOverlay != CompositionOverlay.NONE,
+                            onClick = { activeSubPanel = UtilitySubPanel.GRID }
+                        )
+
+                        UtilityIconButton(
+                            icon = Icons.Filled.CropSquare,
+                            label = "ASPECT",
+                            isActive = false,
+                            onClick = { activeSubPanel = UtilitySubPanel.ASPECT }
+                        )
+
+                        UtilityIconButton(
+                            icon = Icons.Filled.Tune,
+                            label = "MANUAL",
+                            isActive = focusDistance != null || isoValue != 400f || shutterValue != 125f || wbValue != 5600f,
+                            onClick = { activeSubPanel = UtilitySubPanel.MANUAL }
+                        )
+
+                        UtilityIconButton(
+                            icon = Icons.Filled.ScreenRotation,
+                            label = "LEVEL",
+                            isActive = isVirtualHorizonEnabled,
+                            onClick = onHorizonToggle
+                        )
+                    }
+                }
+
+                UtilitySubPanel.GRID -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.Black.copy(alpha = 0.85f))
+                            .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(14.dp))
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        IconButton(onClick = { activeSubPanel = UtilitySubPanel.NONE }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
+                        }
+
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val grids = listOf(
+                                "OFF" to CompositionOverlay.NONE,
+                                "3x3" to CompositionOverlay.RULE_OF_THIRDS,
+                                "PHI" to CompositionOverlay.GOLDEN_RATIO,
+                                "SPIRAL" to CompositionOverlay.GOLDEN_SPIRAL,
+                                "TRI" to CompositionOverlay.GOLDEN_TRIANGLE,
+                                "SYM" to CompositionOverlay.DYNAMIC_SYMMETRY
+                            )
+
+                            grids.forEach { (label, overlay) ->
+                                val isSelected = compositionOverlay == overlay
+                                Box(
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .background(if (isSelected) com.example.ui.theme.Orange500 else Color.Transparent)
+                                        .clickable { onOverlayChange(overlay) }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Text(
+                                        text = label,
+                                        color = if (isSelected) Color.Black else Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                UtilitySubPanel.ASPECT -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.Black.copy(alpha = 0.85f))
+                            .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(14.dp))
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        IconButton(onClick = { activeSubPanel = UtilitySubPanel.NONE }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
+                        }
+
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val ratios = listOf(
+                                AspectRatioMode.RATIO_9_16 to "9:16",
+                                AspectRatioMode.RATIO_3_4 to "3:4",
+                                AspectRatioMode.RATIO_1_1 to "1:1",
+                                AspectRatioMode.RATIO_4_3 to "4:3",
+                                AspectRatioMode.RATIO_16_9 to "16:9",
+                                AspectRatioMode.FULL to "FULL"
+                            )
+
+                            ratios.forEach { (mode, label) ->
+                                val isSelected = aspectRatioMode == mode
+                                Box(
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .background(if (isSelected) com.example.ui.theme.Orange500 else Color.Transparent)
+                                        .clickable { onAspectRatioChange(mode) }
+                                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                                ) {
+                                    Text(
+                                        text = label,
+                                        color = if (isSelected) Color.Black else Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                UtilitySubPanel.MANUAL -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.Black.copy(alpha = 0.85f))
+                            .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(14.dp))
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            IconButton(onClick = { activeSubPanel = UtilitySubPanel.NONE }, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
+                            }
+
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                horizontalArrangement = Arrangement.SpaceEvenly,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                listOf("ISO", "SHUTTER", "WB", "FOCUS").forEach { param ->
+                                    val isSelected = activeManualParam == param
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(CircleShape)
+                                            .background(if (isSelected) Color.White.copy(alpha = 0.12f) else Color.Transparent)
+                                            .clickable { activeManualParam = param }
+                                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                                    ) {
+                                        Text(
+                                            text = param,
+                                            color = if (isSelected) com.example.ui.theme.Orange500 else Color.White,
+                                            fontSize = 11.sp,
+                                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp)
+                        ) {
+                            when (activeManualParam) {
+                                "ISO" -> {
+                                    Text(
+                                        text = "ISO: ${isoValue.toInt()}",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                                        modifier = Modifier.padding(bottom = 2.dp)
+                                    )
+                                    Slider(
+                                        value = isoValue,
+                                        onValueChange = onIsoChange,
+                                        valueRange = 100f..3200f,
+                                        colors = SliderDefaults.colors(
+                                            thumbColor = Color.White,
+                                            activeTrackColor = com.example.ui.theme.Orange500
+                                        )
+                                    )
+                                }
+                                "SHUTTER" -> {
+                                    Text(
+                                        text = "SHUTTER: 1/${shutterValue.toInt()}",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                                        modifier = Modifier.padding(bottom = 2.dp)
+                                    )
+                                    Slider(
+                                        value = shutterValue,
+                                        onValueChange = onShutterChange,
+                                        valueRange = 30f..1000f,
+                                        colors = SliderDefaults.colors(
+                                            thumbColor = Color.White,
+                                            activeTrackColor = com.example.ui.theme.Orange500
+                                        )
+                                    )
+                                }
+                                "WB" -> {
+                                    Text(
+                                        text = "WB: ${wbValue.toInt()}K",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                                        modifier = Modifier.padding(bottom = 2.dp)
+                                    )
+                                    Slider(
+                                        value = wbValue,
+                                        onValueChange = onWbChange,
+                                        valueRange = 2000f..8000f,
+                                        colors = SliderDefaults.colors(
+                                            thumbColor = Color.White,
+                                            activeTrackColor = com.example.ui.theme.Orange500
+                                        )
+                                    )
+                                }
+                                "FOCUS" -> {
+                                    val isAuto = focusDistance == null
+                                    Text(
+                                        text = "FOCUS: ${if (isAuto) "AUTO (AF)" else String.format(Locale.US, "MF (%.2f)", focusDistance)}",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                                        modifier = Modifier.padding(bottom = 2.dp)
+                                    )
+                                    Slider(
+                                        value = focusDistance ?: 0f,
+                                        onValueChange = { onFocusChange(if (it < 0.1f) null else it) },
+                                        valueRange = 0f..10f,
+                                        colors = SliderDefaults.colors(
+                                            thumbColor = Color.White,
+                                            activeTrackColor = com.example.ui.theme.Orange500
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun UtilityIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    isActive: Boolean,
+    onClick: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clickable { onClick() }
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = if (isActive) com.example.ui.theme.Orange500 else Color.White.copy(alpha = 0.5f),
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = label,
+            color = if (isActive) com.example.ui.theme.Orange500 else Color.White.copy(alpha = 0.5f),
+            fontSize = 8.sp,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+        )
     }
 }

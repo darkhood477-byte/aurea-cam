@@ -1,6 +1,9 @@
 {
   "name": "Aurea Cam",
   "description": "Professional camera app with composition overlays for content creators.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "android.permission.CAMERA",
+    "android.permission.RECORD_AUDIO"
+  ],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
