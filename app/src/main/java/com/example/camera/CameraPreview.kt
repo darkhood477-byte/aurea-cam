@@ -145,7 +145,8 @@ fun CameraPreviewWithUseCases(
     onTapToFocus: (Float, Float) -> Unit = { _, _ -> },
     onLongPressToLock: (Float, Float) -> Unit = { _, _ -> },
     onExposureChange: (Float) -> Unit = {},
-    onFocusDistanceChange: (Float) -> Unit = {}
+    onFocusDistanceChange: (Float) -> Unit = {},
+    onExposureStateAvailable: (Int, Int, Float) -> Unit = { _, _, _ -> }
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -321,7 +322,14 @@ fun CameraPreviewWithUseCases(
                 lifecycleOwner,
                 resolvedSelector,
                 useCaseGroup
-            )
+            ).also { camera ->
+                camera?.let { cam ->
+                    val state = cam.cameraInfo.exposureState
+                    val range = state.exposureCompensationRange
+                    val step = state.exposureCompensationStep
+                    onExposureStateAvailable(range.lower, range.upper, step.toFloat())
+                }
+            }
         } catch (e: Exception) {
             Log.e("CameraPreview", "Use case binding failed", e)
         }
